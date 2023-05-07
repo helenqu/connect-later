@@ -1,0 +1,45 @@
+categorical: false
+heatmaps_donefile: /pscratch/sd/h/helenqu/plasticc/gp_interp/done.txt
+init_env: ''
+lcdata_paths:
+- /pscratch/sd/h/helenqu/plasticc/plasticc_train_lightcurves.csv.gz
+metadata_paths:
+- /pscratch/sd/h/helenqu/plasticc/plasticc_train_metadata.csv.gz
+mode: train
+num_epochs: 400
+batch_size: 32
+output_path: /pscratch/sd/h/helenqu/plasticc/gp_interp
+sbatch_header_path: /global/homes/h/helenqu/transformer_uda/SBATCH_Perlmutter.TEMPLATE
+sn_type_id_to_name:
+  0: SNII
+  5: SNII
+  101: SNII
+  102: SNII
+  103: SNII
+  104: SNII
+  105: SNII
+  106: SNIa
+  110: SNII
+  111: SNII
+  112: SNII
+  113: SNII
+  114: SNII
+  115: SNII
+  118: SNIa
+  119: SNIa
+  120: SNIa
+types:
+- 6
+- 15
+- 16
+- 42
+- 52
+- 53
+- 62
+- 64
+- 65
+- 67
+- 88
+- 90
+- 92
+- 95
