@@ -1,3 +1,4 @@
 **/transformer_uda/wandb/*
 transformer_uda/transformer_uda/wandb/
 __pycache__/
+**/slurm*

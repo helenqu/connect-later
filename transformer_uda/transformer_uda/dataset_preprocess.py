@@ -33,6 +33,7 @@ from transformers import PretrainedConfig
 
 import numpy as np
 import pandas as pd
+import pdb
 
 @lru_cache(10_000)
 def convert_to_pandas_period(date, freq):
@@ -144,6 +145,7 @@ def create_transformation(config: PretrainedConfig, time_features: list) -> Tran
 def create_instance_splitter(
     config: PretrainedConfig,
     mode: str,
+    allow_padding: Optional[bool] = True,
     train_sampler: Optional[InstanceSampler] = None,
     validation_sampler: Optional[InstanceSampler] = None,
 ) -> Transformation:
@@ -152,10 +154,15 @@ def create_instance_splitter(
     instance_sampler = {
         "train": train_sampler
         or ExpectedNumInstanceSampler(
-            num_instances=1.0, min_future=config.prediction_length
+            num_instances=1.0,
+            min_past=0 if allow_padding else config.context_length,
+            min_future=config.prediction_length,
         ),
         "validation": validation_sampler
-        or ValidationSplitSampler(min_future=config.prediction_length),
+        or ValidationSplitSampler(
+            min_past=0 if allow_padding else config.context_length,
+            min_future=config.prediction_length
+        ),
         "test": TestSplitSampler(),
     }[mode]
 
@@ -179,7 +186,8 @@ def create_train_dataloader(
     batch_size: int,
     num_batches_per_epoch: int,
     shuffle_buffer_length: Optional[int] = None,
-    cache_data: bool = True,
+    cache_data: Optional[bool] = True,
+    allow_padding: Optional[bool] = True,
     **kwargs,
 ) -> Iterable:
 
@@ -199,6 +207,7 @@ def create_train_dataloader(
         "future_values",
         "future_observed_mask",
     ]
+
     if config.has_labels:
         TRAINING_INPUT_NAMES.append("labels")
         dataset = dataset.rename_column("label", "labels")
@@ -211,8 +220,9 @@ def create_train_dataloader(
     if cache_data:
         transformed_data = Cached(transformed_data)
 
+
     # we initialize a Training instance
-    instance_splitter = create_instance_splitter(config, "train") + SelectFields(
+    instance_splitter = create_instance_splitter(config, "train", allow_padding) + SelectFields(
         TRAINING_INPUT_NAMES #+ ["objid"]
     )
 
@@ -247,6 +257,7 @@ def create_test_dataloader(
     dataset,
     time_features,
     batch_size: int,
+    allow_padding: Optional[bool] = True,
     **kwargs,
 ):
     PREDICTION_INPUT_NAMES = [
@@ -269,7 +280,7 @@ def create_test_dataloader(
 
     # we create a Test Instance splitter which will sample the very last
     # context window seen during training only for the encoder.
-    instance_sampler = create_instance_splitter(config, "test") + SelectFields(
+    instance_sampler = create_instance_splitter(config, "test", allow_padding) + SelectFields(
         PREDICTION_INPUT_NAMES
     )
 

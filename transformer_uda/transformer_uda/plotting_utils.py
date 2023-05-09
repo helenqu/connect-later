@@ -9,7 +9,7 @@ import pdb
 
 def plot_batch_examples(
     dataloader: DataLoader,
-    labels_path: str,
+    labels_path: str = None, # TODO: add support for multiple label paths or reorganize the labels files
     num_examples: int = 10
 ):
     """Plot examples from a batch of data from a dataloader.
@@ -18,7 +18,8 @@ def plot_batch_examples(
         dataloader (torch.utils.data.DataLoader): Dataloader to plot examples from.
         n_examples (int, optional): Number of examples to plot. Defaults to 5."""
     batch = next(iter(dataloader))
-    type_labels = pd.read_csv(labels_path)
+    if labels_path is not None:
+        type_labels = pd.read_csv(labels_path)
 
     cols = num_examples // 2
     fig, axes = plt.subplots(nrows=2, ncols=cols, figsize=(20, 8))
@@ -26,18 +27,20 @@ def plot_batch_examples(
     colors = cmap(np.linspace(0,1,8))
     bands = ['u', 'g', 'r', 'i', 'z', 'Y']
     for i in range(num_examples):
-        objid = int(batch['objid'][i])
-        label = type_labels[type_labels['object_id'] == objid].label.values[0]
         ax = axes[i // cols, i % cols]
         for band_idx, band in enumerate(bands):
             past_row = batch['past_values'][i,:,band_idx]
             future_row = batch['future_values'][i,:,band_idx]
             ax.scatter(range(len(past_row)), past_row, label=band, color=colors[band_idx])
             ax.scatter(range(len(past_row), len(past_row)+len(future_row)), future_row, label=band, color=colors[band_idx], alpha=0.5)
-        ax.set_title(f"objid: {objid}, type: {label}")
+        if labels_path is not None:
+            objid = int(batch['objid'][i])
+            label = type_labels[type_labels['object_id'] == objid].label.values[0]
+            ax.set_title(f"objid: {objid}, type: {label}")
         if i == 0:
             ax.legend()
     plt.show()
+    fig.savefig("/global/homes/h/helenqu/time_series_transformer/figures/batch_examples_with_padding.pdf", bbox_inches="tight")
 
 def plot_gp_interp_examples(
     gp_interp_path: str,
