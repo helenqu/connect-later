@@ -188,6 +188,7 @@ def create_train_dataloader(
     shuffle_buffer_length: Optional[int] = None,
     cache_data: Optional[bool] = True,
     allow_padding: Optional[bool] = True,
+    add_objid: Optional[bool] = False,
     **kwargs,
 ) -> Iterable:
 
@@ -202,6 +203,9 @@ def create_train_dataloader(
 
     if config.num_static_real_features > 0:
         PREDICTION_INPUT_NAMES.append("static_real_features")
+
+    if add_objid:
+        PREDICTION_INPUT_NAMES.append("objid")
 
     TRAINING_INPUT_NAMES = PREDICTION_INPUT_NAMES + [
         "future_values",
@@ -272,7 +276,11 @@ def create_test_dataloader(
     if config.num_static_real_features > 0:
         PREDICTION_INPUT_NAMES.append("static_real_features")
 
-    dataset = dataset['train'].map(normalize_data)
+    if config.has_labels:
+        PREDICTION_INPUT_NAMES.append("labels")
+        dataset = dataset.rename_column("label", "labels")
+
+    dataset = dataset.map(normalize_data)
     dataset.set_transform(partial(transform_start_field, freq="1M"))
 
     transformation = create_transformation(config, time_features)

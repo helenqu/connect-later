@@ -21,6 +21,7 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
+        print(f"classifier dropout: {classifier_dropout}")
         self.conv_layer = InformerConvLayer(config.hidden_size)
         self.pooler = nn.Linear(config.hidden_size, config.hidden_size)
         self.pooler_activation = nn.Tanh()
@@ -36,6 +37,7 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         past_time_features: torch.Tensor,
         past_observed_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        weights: Optional[torch.Tensor] = None,
         static_categorical_features: Optional[torch.Tensor] = None,
         static_real_features: Optional[torch.Tensor] = None,
         future_values: Optional[torch.Tensor] = None,
@@ -70,12 +72,14 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
 
         conv_output = self.conv_layer(encoder_output)
         conv_output = self.conv_layer(conv_output)
-        # conv_output = self.conv_layer(conv_output)
+        conv_output = self.conv_layer(conv_output)
+        conv_output = self.conv_layer(conv_output)
         pooled_output = self.pooler_activation(self.pooler(conv_output))
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
 
-        loss = BCEWithLogitsLoss()(logits, torch.unsqueeze(F.one_hot(labels, num_classes=self.num_labels).float(), 1))
+        loss_fn = BCEWithLogitsLoss(weight=weights) if weights is not None else BCEWithLogitsLoss()
+        loss = loss_fn(logits, torch.unsqueeze(F.one_hot(labels, num_classes=self.num_labels).float(), 1))
 
         if not return_dict:
             output = (logits,) + outputs[2:]

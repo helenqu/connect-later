@@ -87,7 +87,12 @@ def train(args, config=None):
         has_labels=False
     )
 
+    accelerator = Accelerator()
+    device = accelerator.device
+
     model = InformerForPrediction(model_config)
+    model.to(device)
+
     optimizer = AdamW(
         model.parameters(),
         lr=float(config['lr']),
@@ -100,11 +105,6 @@ def train(args, config=None):
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
-    accelerator = Accelerator()
-    device = accelerator.device
-
-    model.to(device)
-
     train_dataloader = create_train_dataloader(
         config=model_config,
         dataset=dataset['train'],
@@ -115,14 +115,13 @@ def train(args, config=None):
         allow_padding=config['allow_padding'],
     )
 
-    plot_batch_examples(train_dataloader)
-    return
-
     model, optimizer, train_dataloader = accelerator.prepare(
         model,
         optimizer,
         train_dataloader,
     )
+    if args.load_checkpoint:
+        accelerator.load_state(args.load_checkpoint)
 
     num_training_steps = config['num_epochs'] * config['num_batches_per_epoch']
     progress_bar = tqdm(range(num_training_steps))
@@ -158,7 +157,9 @@ def train(args, config=None):
         print(f"epoch {epoch}: loss = {cumulative_loss / idx}")
 
         if epoch % 100 == 0:
-            accelerator.save_state(output_dir=Path(CHECKPOINT_DIR) / f"checkpoint_{start_time.strftime('%Y-%m-%d_%H:%M:%S')}_epoch_{epoch}")
+            ckpt_dir = Path(CHECKPOINT_DIR) / f"checkpoint_{start_time.strftime('%Y-%m-%d_%H:%M:%S')}_epoch_{epoch}"
+            print(f"saving ckpt at {ckpt_dir}")
+            accelerator.save_state(output_dir=ckpt_dir)
         if not args.dry_run:
             wandb.log({"loss": cumulative_loss / idx})
 
@@ -172,6 +173,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, required=True)
     parser.add_argument("--save_model", type=str)
     parser.add_argument("--load_model", type=str)
+    parser.add_argument("--load_checkpoint", type=str)
     parser.add_argument("--dry_run", action="store_true")
 
     args = parser.parse_args()
