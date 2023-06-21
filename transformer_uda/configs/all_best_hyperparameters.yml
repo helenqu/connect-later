@@ -1,0 +1,23 @@
+# informer architecture hyperparams
+dropout_rate: 0.35
+num_encoder_layers: 7
+num_decoder_layers: 8
+d_model: 128
+
+# data hyperparams
+prediction_length: 10
+context_length: 170
+lags: 
+  - 0
+freq: "1M"
+time_features:
+  - "month_of_year"
+
+# training hyperparams
+batch_size: 32
+num_batches_per_epoch: 1000
+weight_decay: 0.1
+lr: 0.0001
+
+allow_padding: True
+data_subset_file: null

@@ -72,6 +72,7 @@ def train_loop(
 
     progress_bar = tqdm(range(num_training_steps))
     metric= load_metric("accuracy")
+    abundances = Counter({k: 0 for k in range(15)})
     save_model_path = Path(CHECKPOINTS_DIR)
     if early_stopping:
         early_stopper = EarlyStopper(patience=3, min_delta=0.01)
@@ -97,6 +98,7 @@ def train_loop(
             logits = outputs.logits
             predictions = torch.argmax(logits, dim=-1)
             correct += (predictions.flatten() == batch['labels']).sum().item()
+            abundances += Counter(batch['labels'].cpu().numpy())
 
         # if save_ckpts and cumulative_loss < best_loss:
         #     torch.save({
@@ -122,6 +124,7 @@ def train_loop(
             })
         if early_stopping and early_stopper.early_stop(val_loss):
             break
+    print(f"training abundances: {abundances}")
     return model
 
 def run_training_stage(stage, model, train_dataloader, val_dataloader, test_dataloader, config, device, dry_run=False, class_weights=None):
@@ -176,6 +179,7 @@ def validate(model, dataloader, device):
     cumulative_loss = 0
     correct = 0
     metric = load_metric("accuracy")
+    abundances = Counter({k: 0 for k in range(15)})
 
     for idx, batch in enumerate(dataloader):
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -188,8 +192,7 @@ def validate(model, dataloader, device):
         correct += (predictions.flatten() == batch['labels']).sum().item()
         metric.add_batch(predictions=predictions, references=batch["labels"])
 
-    accuracy = (100 * correct) / (idx * batch['labels'].shape[0])
-    return cumulative_loss / idx, metric.compute()
+    return cumulative_loss / (idx+1), metric.compute()
 
 def save_model(model, optimizer, output_dir):
     print(f"Saving model to {output_dir}")
@@ -217,10 +220,13 @@ def save_model(model, optimizer, output_dir):
     model.save_pretrained(hf_model_dir)
 
 def train(args, base_config, config=None):
-    config.update(base_config)
     if not args.dry_run:
-        wandb.init(config=config, name="dropout_0.5_wd_1e-3_ftlr_1e-5", project="finetuning-170", dir=WANDB_DIR) #name='finetune-classification-500k-pretrained-lpft', project='sn-transformer', dir=WANDB_DIR)
+        wandb.init(config=config, name="bigger_model_no_pretrain", project="finetuning-170", dir=WANDB_DIR) #name='finetune-classification-500k-pretrained-lpft', project='sn-transformer', dir=WANDB_DIR)
         config = wandb.config
+    if config:
+        config.update(base_config)
+    else:
+        config = base_config
     print(config)
 
     model_config = InformerConfig(
@@ -245,9 +251,11 @@ def train(args, base_config, config=None):
 
     dataset = load_dataset(str(config['dataset_path']), cache_dir=CACHE_DIR)#, download_mode='force_redownload')
     abundances = Counter(dataset['train']['label'])
+    print(abundances)
     max_count = max(abundances.values())
-    class_weights = [max_count / abundances[i] if abundances[i] > 0 else 0 for i in range(15)]
+    class_weights = [max_count / abundances[i] if abundances[i] > 0 and i < 6 else 1 for i in range(15)] # apply class weights to SNe only
     # print(f"Class weights applied: {class_weights}")
+    # return
 
     train_dataloader = create_train_dataloader(
         config=model_config,
@@ -283,7 +291,12 @@ def train(args, base_config, config=None):
         # allow_padding=False
     )
 
-    model = InformerForSequenceClassification.from_pretrained(config['model_path'], config=model_config)
+    if config.get('model_path') and not args.random_init:
+        print(f"Loading model from {config['model_path']}")
+        model = InformerForSequenceClassification.from_pretrained(config['model_path'], config=model_config)
+    elif args.random_init:
+        print("Randomly initializing model")
+        model = InformerForSequenceClassification(model_config)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model.to(device)
@@ -320,48 +333,53 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='create heatmaps from lightcurve data')
     # parser.add_argument('--num_epochs', type=int, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"', required=True)
     parser.add_argument('--context_length', type=int, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
-    parser.add_argument('--load_model', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"', required=True)
+    parser.add_argument('--load_model', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--load_finetuned_model', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--save_model', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--dry_run', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
+    parser.add_argument('--random_init', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
+
     args = parser.parse_args()
 
     DATASET_PATH = Path('/pscratch/sd/h/helenqu/plasticc/train_with_labels')
-    config={
-        'prediction_length': 10 if args.context_length != 100 else 50,
-        'context_length': args.context_length,
-        'time_features': ['month_of_year'],
-        'dataset_path': str(DATASET_PATH),
-        'model_path': args.load_model,
-        'batch_size': 32,
-        'num_batches_per_epoch': 1000,
-        # 'num_epochs': args.num_epochs,
-        "dropout_rate": 0.2,
-        "num_encoder_layers": 11,
-        "num_decoder_layers": 7,
-        "lags": [0],
-        "d_model": 128,
-        "freq": "1M",
-        # 'lr': 1e-4,
-        "pretrain_allow_padding": "no_pad" not in args.load_model,
-    }
-    # with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/finetune_hyperparameters.yml", 'r') as f:
-    #     sweep_config = yaml.safe_load(f)
-    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/context_170_best_finetune_hyperparams.yml", 'r') as f:
-        ft_config = yaml.safe_load(f)
-    ft_config['weight_decay'] = 0.001
-    # ft_config['lp_lr'] = 5e-3
-    # ft_config['lp_epochs'] = 25
-    ft_config['ft_lr'] = 1e-5
-    ft_config['classifier_dropout'] = 1
-
-    # sweep_ids = {
-    #     20: "4t28m5i4",
-    #     100: "r2ejluf9",
-    #     120: "y2ypjqxh",
-    #     170: "9iikc81e"
+    # config={
+    #     'prediction_length': 10 if args.context_length != 100 else 50,
+    #     'context_length': args.context_length,
+    #     'time_features': ['month_of_year'],
+    #     'dataset_path': str(DATASET_PATH),
+    #     'model_path': args.load_model,
+    #     'batch_size': 32,
+    #     'num_batches_per_epoch': 1000,
+    #     # 'num_epochs': args.num_epochs,
+    #     "dropout_rate": 0.2,
+    #     "num_encoder_layers": 11,
+    #     "num_decoder_layers": 7,
+    #     "lags": [0],
+    #     "d_model": 128,
+    #     "freq": "1M",
+    #     # 'lr': 1e-4,
+    #     # "pretrain_allow_padding": "no_pad" not in args.load_model,
     # }
+    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml", "r") as f:
+        config = yaml.safe_load(f)
+    config['dataset_path'] = str(DATASET_PATH)
+    config['model_path'] = args.load_model if args.load_model else None
+
+    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/finetune_hyperparameters.yml", 'r') as f:
+        sweep_config = yaml.safe_load(f)
+    # with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_best_finetune_hyperparams.yml", 'r') as f:
+    #     ft_config = yaml.safe_load(f)
+    # ft_config['weight_decay'] = 0.001
+    # ft_config['lp_lr'] = 5e-3
+    # ft_config['lp_epochs'] = 5
+    # ft_config['ft_epochs'] = 10
+    # ft_config['ft_lr'] = 1e-5
+    # ft_config['classifier_dropout'] = 0.1
+
+    # 20: 1b3ayuf3
+    # all: 8lo16fsr
     # sweep_id = f"helenqu/finetuning-500k-sweep-context-{args.context_length}/{sweep_ids[args.context_length]}"
-    # sweep_id = wandb.sweep(sweep_config, project=f"finetuning-500k-sweep-context-{args.context_length}")
-    # wandb.agent(sweep_id, partial(train, args, config), count=10)
-    train(args, config, ft_config)
+    # sweep_id = wandb.sweep(sweep_config, project=f"finetuning-baseline-sweep-bigger-model")
+    sweep_id ="helenqu/finetuning-baseline-sweep-bigger-model/e7svqp4l"
+    wandb.agent(sweep_id, partial(train, args, config), count=10)
+    # train(args, config, ft_config)

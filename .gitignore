@@ -1,4 +1,5 @@
 **/transformer_uda/wandb/*
 transformer_uda/transformer_uda/wandb/
+transformer_uda/transformer_uda/.ipynb_checkpoints
 __pycache__/
 **/slurm*

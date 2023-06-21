@@ -1,5 +1,5 @@
 """
-preprocess data that has already been GP-interpolated
+preprocess non-GP-interpolated data for use with learnable Fourier PE
 """
 
 from functools import lru_cache
@@ -43,18 +43,51 @@ import pdb
 def convert_to_pandas_period(date, freq):
     return pd.Period(date, freq)
 
-def normalize_data(example):
-    example["target"] = example["target"] / np.max(example["target"])
+def normalize_all(example, field_name):
+    # normalize to [0,1] overall (min-max normalization to get rid of negative values)
+    values = example[field_name]
+    example[field_name] = (values - np.min(values)) / (np.max(values) - np.min(values))
+    return example
+
+def normalize_by_channel(example, field_name):
+    # normalize to [0,1] by channel (min-max normalization to get rid of negative values)
+    for row in range(len(example[field_name])):
+        row_values = example[field_name][row]
+        example[field_name][row] = (row_values - np.min(row_values)) / (np.max(row_values) - np.min(row_values))
+    return example
+
+def create_attention_mask(example):
+    # create attention mask
+    example["attention_mask"] = np.zeros_like(example["transposed_target"])
+    example["attention_mask"][:,example['transposed_target'][0] != 0] = 1 # mask if flux value is 0 (padding)
     return example
 
 def transform_start_field(batch, freq):
     # batch["start"] = [convert_to_pandas_period(date, freq) for date in batch["start"]]
     #TODO: threw out start field, otherwise have to convert from mjd
-    batch["start"] = [convert_to_pandas_period("2010-12-29", freq) for date in batch["start"]]
+    batch["start"] = [convert_to_pandas_period("2010-12-29", freq) for example in batch]
     return batch
 
-def create_transformation(config: PretrainedConfig, time_features: list) -> Transformation:
-    # create list of fields to remove later
+def transform_raw_data_example(example):
+    # was 300 x 2, need to be 2 x 300 (first dim is channel)
+    example['transposed_target'] = np.array(example['target']).T
+    example['transposed_times_wv'] = np.array(example['times_wv']).T
+    # divide by max value to constrain to [0,1]
+    example = normalize_by_channel(example, "transposed_times_wv")
+    example = normalize_all(example, "transposed_target") # normalize flux, flux_err by max overall
+    example = create_attention_mask(example)
+    return example
+
+def transform_raw_data(dataset, config: PretrainedConfig):
+    # normalize time, data; create attention mask
+    dataset = dataset.map(transform_raw_data_example)
+    dataset.set_transform(partial(transform_start_field, freq="1M"))
+    # have to swap out these field names because can't change dataset field shapes in place
+    dataset = dataset.remove_columns(["target", "times_wv"])
+    dataset = dataset.rename_column("transposed_target", "target")
+    dataset = dataset.rename_column("transposed_times_wv", "times_wv")
+
+    # remove/rename fields
     remove_field_names = []
     if config.num_static_real_features == 0:
         remove_field_names.append(FieldName.FEAT_STATIC_REAL)
@@ -65,85 +98,32 @@ def create_transformation(config: PretrainedConfig, time_features: list) -> Tran
 
     return Chain(
         # step 1: remove static/dynamic fields if not specified
-        [RemoveFields(field_names=remove_field_names)]
-        # step 2: convert the data to NumPy (potentially not needed)
-        + (
-            [
-                AsNumpyArray(
-                    field=FieldName.FEAT_STATIC_CAT,
-                    expected_ndim=1,
-                    dtype=int,
-                )
-            ]
-            if config.num_static_categorical_features > 0
-            else []
-        )
-        + (
-            [
-                AsNumpyArray(
-                    field=FieldName.FEAT_STATIC_REAL,
-                    expected_ndim=1,
-                )
-            ]
-            if config.num_static_real_features > 0
-            else []
-        )
-        + [
-            AsNumpyArray(
-                field=FieldName.TARGET,
-                # we expect an extra dim for the multivariate case:
-                expected_ndim=1 if config.input_size == 1 else 2,
-            ),
-            # step 3: handle the NaN's by filling in the target with zero
-            # and return the mask (which is in the observed values)
-            # true for observed values, false for nan's
-            # the decoder uses this mask (no loss is incurred for unobserved values)
-            # see loss_weights inside the xxxForPrediction model
-            #TODO: shouldn't have any nans, but maybe can use this if we try not doing GP
-            AddObservedValuesIndicator(
-                target_field=FieldName.TARGET,
-                output_field=FieldName.OBSERVED_VALUES,
-            ),
-            # step 4: add temporal features based on freq of the dataset
-            # these serve as positional encodings
-            AddTimeFeatures(
-                start_field=FieldName.START,
-                target_field=FieldName.TARGET,
-                output_field=FieldName.FEAT_TIME,
-                time_features=time_features,#time_features_from_frequency_str(freq),
-                pred_length=config.prediction_length,
-            ),
-            # step 5: add another temporal feature (just a single number)
-            # tells the model where in the life the value of the time series is
-            # sort of running counter
-            AddAgeFeature(
-                target_field=FieldName.TARGET,
-                output_field=FieldName.FEAT_AGE,
-                pred_length=config.prediction_length,
-                log_scale=True,
-            ),
-            # step 6: vertically stack all the temporal features into the key FEAT_TIME
-            VstackFeatures(
-                output_field=FieldName.FEAT_TIME,
-                input_fields=[FieldName.FEAT_TIME, FieldName.FEAT_AGE]
-                + (
-                    [FieldName.FEAT_DYNAMIC_REAL]
-                    if config.num_dynamic_real_features > 0
-                    else []
-                ),
-            ),
-            # step 7: rename to match HuggingFace names
-            RenameFields(
-                mapping={
-                    FieldName.FEAT_STATIC_CAT: "static_categorical_features",
-                    FieldName.FEAT_STATIC_REAL: "static_real_features",
-                    FieldName.FEAT_TIME: "time_features",
-                    FieldName.TARGET: "values",
-                    FieldName.OBSERVED_VALUES: "observed_mask",
-                }
-            ),
-        ]
-    )
+        [RemoveFields(field_names=remove_field_names),
+        AsNumpyArray(
+            field="times_wv",
+            # we expect an extra dim for the multivariate case:
+            expected_ndim=2,
+        ),
+        AsNumpyArray(
+            field=FieldName.TARGET,
+            # we expect an extra dim for the multivariate case:
+            expected_ndim=2,
+        ),
+        AsNumpyArray(
+            field='attention_mask',
+            # we expect an extra dim for the multivariate case:
+            expected_ndim=2,
+        ),
+        RenameFields(
+            mapping={
+                FieldName.FEAT_STATIC_CAT: "static_categorical_features",
+                FieldName.FEAT_STATIC_REAL: "static_real_features",
+                "times_wv": "time_features",
+                FieldName.TARGET: "values",
+                "attention_mask": "observed_mask",
+            }
+        )]
+    ).apply(dataset)
 
 def create_instance_splitter(
     config: PretrainedConfig,
@@ -182,7 +162,7 @@ def create_instance_splitter(
         time_series_fields=["time_features", "observed_mask"],
     )
 
-def create_train_dataloader(
+def create_train_dataloader_raw(
     config: PretrainedConfig,
     dataset,
     time_features,
@@ -219,15 +199,10 @@ def create_train_dataloader(
         TRAINING_INPUT_NAMES.append("labels")
         dataset = dataset.rename_column("label", "labels")
 
-    dataset = dataset.map(normalize_data)
-    dataset.set_transform(partial(transform_start_field, freq="1M"))
+    transformed_data = transform_raw_data(dataset, config)
+    # if cache_data:
+    #     transformed_data = Cached(transformed_data)
 
-    transformation = create_transformation(config, time_features)
-    transformed_data = transformation.apply(dataset, is_train=True)
-    if cache_data:
-        transformed_data = Cached(transformed_data)
-
-    pdb.set_trace()
     # we initialize a Training instance
     instance_splitter = create_instance_splitter(config, "train", allow_padding) + SelectFields(
         TRAINING_INPUT_NAMES #+ ["objid"]
@@ -294,13 +269,7 @@ def create_test_dataloader(
             "future_observed_mask",
         ]
 
-    dataset = dataset.map(normalize_data)
-    print(len(dataset))
-    dataset.set_transform(partial(transform_start_field, freq="1M"))
-
-    transformation = create_transformation(config, time_features)
-    transformed_data = transformation.apply(dataset, is_train=False)
-
+    transformed_data = transform_raw_data(dataset)
     # we create a Test Instance splitter which will sample the very last
     # context window seen during training only for the encoder.
     instance_sampler = create_instance_splitter(config, "test", allow_padding) + SelectFields(

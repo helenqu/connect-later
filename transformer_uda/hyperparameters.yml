@@ -17,20 +17,20 @@ parameters:
       - 1e-5
       - 5e-6
       - 1e-6
-  num_batches_per_epoch:
-    values:
-      - 500
-      - 1000
-      - 1500
-      - 2000
-  num_encoder_layers:
-    max: 12
-    min: 3
-    distribution: int_uniform
-  num_decoder_layers:
-    max: 8
-    min: 2
-    distribution: int_uniform
+  # num_batches_per_epoch:
+  #   values:
+  #     - 500
+  #     - 1000
+  #     - 1500
+  #     - 2000
+  # num_encoder_layers:
+  #   max: 12
+  #   min: 3
+  #   distribution: int_uniform
+  # num_decoder_layers:
+  #   max: 8
+  #   min: 2
+  #   distribution: int_uniform
   dropout_rate:
     values:
       - 0.05
@@ -41,28 +41,28 @@ parameters:
       - 0.3
       - 0.35
       - 0.4
-  batch_size:
-    values:
-      - 16
-      - 32
-      - 64
-      - 128
-      - 256
-  d_model:
-    values:
-      - 16
-      - 32
-      - 64
-      - 128
-  context_length:
-    values:
-      - 20
-      - 40
-      - 60
-      - 80
-      - 100
-      - 150
-      - 170
+  # batch_size:
+  #   values:
+  #     - 16
+  #     - 32
+  #     - 64
+  #     - 128
+  #     - 256
+  # d_model:
+  #   values:
+  #     - 16
+  #     - 32
+  #     - 64
+  #     - 128
+  # context_length:
+  #   values:
+  #     - 20
+  #     - 40
+  #     - 60
+  #     - 80
+  #     - 100
+  #     - 150
+  #     - 170
   weight_decay:
     values: 
       - 1e-3
@@ -71,16 +71,30 @@ parameters:
       - 5e-2
       - 1e-1
       - 5e-1
+  # allow_padding:
+  #   values:
+  #     - True
+      # - False
   num_epochs: 
     values:
       - 100
-  prediction_length:
-    values:
-      - 10
-  freq:
-    values:
-      - '1M'
-  time_features:
-    values:
-      - 
-        - 'month_of_year'
+  # prediction_length:
+  #   values:
+  #     - 10
+  # freq:
+  #   values:
+  #     - '1M'
+  # time_features:
+  #   values:
+  #     - 
+  #       - 'month_of_year'
+  # context_length:
+  #   values:
+  #     - 170
+  # prediction_length:
+  #   values:
+  #     - 10
+  # data_subset_file:
+  #   values:
+  #     # - "/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/examples/single_test_file_plus_train.txt"
+  #     - null
