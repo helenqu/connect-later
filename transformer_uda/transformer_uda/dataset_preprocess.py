@@ -166,7 +166,10 @@ def create_instance_splitter(
             min_past=0 if allow_padding else config.context_length,
             min_future=config.prediction_length
         ),
-        "test": TestSplitSampler(),
+        "test": ValidationSplitSampler(#TestSplitSampler(),
+            min_past=0 if allow_padding else config.context_length,
+            min_future=config.prediction_length
+        ),
     }[mode]
 
     print(f"instance splitter created with context length {config.context_length}, lags {config.lags_sequence}")
@@ -227,7 +230,6 @@ def create_train_dataloader(
     if cache_data:
         transformed_data = Cached(transformed_data)
 
-    pdb.set_trace()
     # we initialize a Training instance
     instance_splitter = create_instance_splitter(config, "train", allow_padding) + SelectFields(
         TRAINING_INPUT_NAMES #+ ["objid"]

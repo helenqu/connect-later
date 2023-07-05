@@ -43,9 +43,8 @@ parameters:
   lp_epochs: 
     values:
       - 0
-      - 5
-      - 10
       - 20
+      - 100
   ft_epochs: 
     values:
       - 5

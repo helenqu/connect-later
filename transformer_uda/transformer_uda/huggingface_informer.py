@@ -40,7 +40,7 @@ def get_dataset(data_dir, data_subset_file=None):
     else:
         data_subset = [str(x) for x in Path(data_dir).glob("*.jsonl")] # this includes original training set
     print(f"using data subset: {data_subset}")
-    dataset = load_dataset(data_dir, data_files={"train": data_subset}, cache_dir=CACHE_DIR)
+    dataset = load_dataset(data_dir, data_files={"train": data_subset}, cache_dir=CACHE_DIR)#, download_mode="force_redownload")
     print(f"loading dataset {'from file ' if data_subset_file is not None else ''}with {len(dataset['train'])} examples")
 
     return dataset
@@ -70,6 +70,25 @@ def save_model(model, optimizer, output_dir):
 
     model.save_pretrained(hf_model_dir)
 
+def prepare_model_input(batch, device, config, mask):
+    model_inputs = {
+            "past_time_features": batch['past_time_features'].to(device),
+            "past_values": batch["past_values"].to(device),
+            "past_observed_mask": batch["past_observed_mask"].to(device),
+    }
+    if config.num_static_categorical_features > 0:
+        model_inputs["static_categorical_features"] = batch["static_categorical_features"].to(device)
+    if config.num_static_real_features > 0:
+        model_inputs["static_real_features"] = batch["static_real_features"].to(device)
+    if not mask:
+        model_inputs["future_time_features"] = batch["future_time_features"].to(device)
+        model_inputs["future_observed_mask"] = batch["future_observed_mask"].to(device)
+        model_inputs["future_values"] = batch["future_values"].to(device)
+    else:
+        model_inputs["labels"] = batch["mask_label"].to(device)
+
+    return model_inputs
+
 def train(args, base_config, add_config=None):
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
@@ -86,7 +105,7 @@ def train(args, base_config, add_config=None):
 
     if not args.dry_run and accelerator.is_main_process:
         print("initializing wandb")
-        wandb.init(project="informer", name="bigger_model_batch_1024_lr_1e-4", config=base_config, dir=WANDB_DIR) #mode="offline")
+        wandb.init(project="informer", name="masked", config=base_config, dir=WANDB_DIR) #mode="offline")
         add_config = wandb.config
     print(add_config)
     config = base_config
@@ -115,7 +134,9 @@ def train(args, base_config, add_config=None):
         # project input from num_of_variates*len(lags_sequence)+num_time_features to:
         d_model=config['d_model'],
         scaling=config['scaling'],
-        has_labels=False
+        has_labels=False,
+        mask=args.mask,
+        mask_probability=config['mask_probability'],
     )
 
     addl_config = {}
@@ -136,13 +157,16 @@ def train(args, base_config, add_config=None):
 
     model_config.update(addl_config)
 
-    if args.fourier_pe and args.masked:
+    if args.fourier_pe and args.mask:
+        print("instantiating model with fourier PE and masking")
         model = MaskedInformerFourierPE(model_config)
         dataloader_fn = create_train_dataloader_raw
     elif args.fourier_pe:
+        print("instantiating model with fourier PE")
         model = InformerFourierPEForPrediction(model_config)
         dataloader_fn = create_train_dataloader_raw
     else:
+        print("instantiating model with GP-interpolated inputs")
         model = InformerForPrediction(model_config)
         dataloader_fn = create_train_dataloader
     print(model)
@@ -166,7 +190,7 @@ def train(args, base_config, add_config=None):
     train_dataloader = dataloader_fn(
         config=model_config,
         dataset=dataset['train'],
-        time_features=[month_of_year] if 'month_of_year' in config['time_features'] else None,
+        time_features=[month_of_year] if 'month_of_year' in config['time_features'] else None, # not used in raw version
         batch_size=config['batch_size'],
         num_batches_per_epoch=config['num_batches_per_epoch'],
         shuffle_buffer_length=1_000_000,
@@ -190,21 +214,12 @@ def train(args, base_config, add_config=None):
     for epoch in range(config['num_epochs']):
         cumulative_loss = 0
         for idx, batch in enumerate(train_dataloader):
+            if idx == 0:
+                print(batch['past_values'][0])
+                print(batch['labels'][0])
             optimizer.zero_grad()
-            outputs = model(
-                static_categorical_features=batch["static_categorical_features"].to(device)
-                if model_config.num_static_categorical_features > 0
-                else None,
-                static_real_features=batch["static_real_features"].to(device)
-                if model_config.num_static_real_features > 0
-                else None,
-                past_time_features=batch["past_time_features"].to(device),
-                past_values=batch["past_values"].to(device),
-                future_time_features=batch["future_time_features"].to(device),
-                future_values=batch["future_values"].to(device),
-                past_observed_mask=batch["past_observed_mask"].to(device),
-                future_observed_mask=batch["future_observed_mask"].to(device),
-            )
+
+            outputs = model(**prepare_model_input(batch, device, model_config, args.mask))
             loss = outputs.loss
 
             # Backpropagation
@@ -227,7 +242,6 @@ def train(args, base_config, add_config=None):
         save_model(model, optimizer, args.save_model)
 
 if __name__ == "__main__":
-    print(f"start python script, {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--num_epochs", type=int, required=True)
@@ -236,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--load_checkpoint", type=str)
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--fourier_pe", action="store_true")
-    parser.add_argument("--masked", action="store_true")
+    parser.add_argument("--mask", action="store_true")
     parser.add_argument("--log_level", type=str)
     parser.add_argument("--lr", type=float)
 
@@ -252,13 +266,14 @@ if __name__ == "__main__":
     config['dropout_rate'] = 0.2
     config['lr'] = 0.0001
     config['batch_size'] = 1024
-    # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/raw/examples/just_train_set.txt"
+    config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/raw/plasticc_raw_examples/single_test_file.txt"
     # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/examples/15_percent_filepaths.txt"
     config['scaling'] = None
     # config["context_length"] = 170
     # config["prediction_length"] = 10
     # config["num_epochs"] = args.num_epochs
     config["allow_padding"] = True
+    config["mask_probability"] = 0.5
 
     train(args, config)
     # sweep_id = wandb.sweep(sweep_config, project="pretraining-fourier-sweep")

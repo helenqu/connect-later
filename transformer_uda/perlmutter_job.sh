@@ -19,7 +19,7 @@ module load pytorch/1.13.1
 accelerate launch --multi_gpu --num_processes=4 \
     /global/homes/h/helenqu/time_series_transformer/transformer_uda/transformer_uda/huggingface_informer.py \
     --data_dir /pscratch/sd/h/helenqu/plasticc/raw/plasticc_raw_examples \
-    --load_model /pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/pretrained_all_75M_params_fourier/torch_model/model.pt \
-    --save_model /pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/pretrained_all_75M_params_fourier \
+    --save_model /pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/pretrained_all_masked \
     --fourier_pe \
+    --mask \
     --num_epochs 15

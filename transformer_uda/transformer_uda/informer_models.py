@@ -2,12 +2,12 @@ from typing import List, Optional, Tuple, Union
 
 from transformers import InformerPreTrainedModel, InformerModel, InformerForPrediction, InformerConfig
 from transformers.models.informer.modeling_informer import InformerConvLayer, InformerEncoder, InformerEncoderLayer, InformerDecoder, _expand_mask, weighted_average, nll
-from transformers.modeling_outputs import SequenceClassifierOutput, Seq2SeqTSModelOutput, BaseModelOutput, Seq2SeqTSPredictionOutput, BaseModelOutputWithPastAndCrossAttentions
+from transformers.modeling_outputs import SequenceClassifierOutput, Seq2SeqTSModelOutput, BaseModelOutput, Seq2SeqTSPredictionOutput, BaseModelOutputWithPastAndCrossAttentions, MaskedLMOutput
 from transformers.time_series_utils import StudentTOutput, NormalOutput, NegativeBinomialOutput
 
 import torch
 import torch.nn as nn
-from torch.nn import BCEWithLogitsLoss, functional as F
+from torch.nn import BCEWithLogitsLoss, MSELoss, functional as F
 
 import pdb
 import numpy as np
@@ -559,6 +559,76 @@ class MaskedInformerFourierPE(InformerPreTrainedModel):
         self.post_init()
 
     #TODO: write forward(), add MaskedInformerDecoder class
+    def forward(
+        self,
+        past_values: torch.Tensor,
+        past_time_features: torch.Tensor,
+        past_observed_mask: torch.Tensor,
+        labels: Optional[torch.Tensor] = None, # -100 for padding, true value for masked tokens
+        static_categorical_features: Optional[torch.Tensor] = None,
+        static_real_features: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        use_cache: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Seq2SeqTSModelOutput, Tuple]: #TODO: not seq2seq output type
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        transformer_inputs, loc, scale, static_feat = self.create_network_inputs(
+            past_values=past_values,
+            past_time_features=past_time_features,
+            past_observed_mask=past_observed_mask,
+            static_categorical_features=static_categorical_features,
+            static_real_features=static_real_features,
+        )
+
+        outputs = self.encoder(
+            inputs_embeds=transformer_inputs,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        prediction_scores = self.decoder(outputs[0]) # 1D array of predicted values (TODO: does it need to go through softmax? Bert doesn't)
+
+        masked_lm_loss = None
+        if labels is not None:
+            loss_fct = MSELoss()  # 0 = unmasked token, mask from loss
+            mask = labels.view(-1) != 0 # flattened
+            masked_predictions = prediction_scores.view(-1) * mask
+            masked_lm_loss = loss_fct(masked_predictions, labels.view(-1))
+
+        if not return_dict:
+            output = (prediction_scores,) + outputs[2:]
+            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+        return MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=prediction_scores,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+class MaskedInformerDecoder(InformerPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.config = config
+
+        self.decoder = nn.Linear(config.hidden_size, config.context_length) # hijacking "context_length" to mean size of input sequence
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(self, values):
+        return self.decoder(values)
 
 class InformerForSequenceClassification(InformerPreTrainedModel):
     def __init__(self, config):
@@ -567,7 +637,7 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         print(f"num labels: {self.num_labels}")
         self.config = config
 
-        self.informer = InformerModel(config)
+        self.informer = InformerModel(config) if not config.fourier_pe else InformerFourierPEModel(config)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
@@ -612,21 +682,32 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
             past_values=past_values,
             past_time_features=past_time_features,
             past_observed_mask=past_observed_mask,
+            future_values=future_values,
+            future_time_features=future_time_features,
             static_categorical_features=static_categorical_features,
             static_real_features=static_real_features,
+            decoder_attention_mask=decoder_attention_mask,
+            head_mask=head_mask,
+            decoder_head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
+            encoder_outputs=encoder_outputs,
+            past_key_values=past_key_values,
             output_hidden_states=output_hidden_states,
             output_attentions=output_attentions,
+            use_cache=use_cache,
             return_dict=return_dict,
         )
 
-        encoder_output = outputs.encoder_last_hidden_state
+        decoder_output = outputs.last_hidden_state
 
         for _ in range(self.num_conv_layers):
-            encoder_output = self.conv_layer(encoder_output)
-        pooled_output = self.pooler_activation(self.pooler(encoder_output))
+            decoder_output = self.conv_layer(decoder_output)
+        pooled_output = self.pooler_activation(self.pooler(decoder_output))
         pooled_output = self.dropout(pooled_output)
 
         logits = self.classifier(pooled_output)
+        print(f"logits shape before: {logits.shape}")
+        # logits = logits.expand(-1, 1, -1) # middle dim is 0, so expand to 1
 
         loss_fn = BCEWithLogitsLoss(weight=weights) if weights is not None else BCEWithLogitsLoss()
         loss = loss_fn(logits, torch.unsqueeze(F.one_hot(labels, num_classes=self.num_labels).float(), 1))
