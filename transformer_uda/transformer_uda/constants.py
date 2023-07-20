@@ -15,4 +15,4 @@ PLASTICC_CLASS_MAPPING = {
     6: "$\mu$-Lens-Single",
     99: "extra",
 }
-INT_LABELS = list(PLASTICC_CLASS_MAPPING.keys())
+INT_LABELS = sorted(PLASTICC_CLASS_MAPPING.keys())

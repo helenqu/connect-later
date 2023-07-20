@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A dessn
 #SBATCH -C gpu
-#SBATCH -t 12:00:00
+#SBATCH -t 4:00:00
 #SBATCH -N 1
 #SBATCH -c 128
 #SBATCH -q regular
@@ -17,9 +17,11 @@ source activate pytorch-1.13.1
 module load pytorch/1.13.1
 # srun python \
 accelerate launch --multi_gpu --num_processes=4 \
+    --mixed_precision=bf16 \
     /global/homes/h/helenqu/time_series_transformer/transformer_uda/transformer_uda/huggingface_informer.py \
     --data_dir /pscratch/sd/h/helenqu/plasticc/raw/plasticc_raw_examples \
-    --save_model /pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/pretrained_all_masked \
+    --load_checkpoint /pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/checkpoints/checkpoint_masked_prob_0.8_no_distil_bf16_2023-07-11_20:00:18_step_25000 \
+    --save_model /pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/pretrained_all_masked_no_distil_bf16 \
     --fourier_pe \
     --mask \
-    --num_epochs 15
+    --num_steps 5_000

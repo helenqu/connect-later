@@ -9,9 +9,10 @@ from collections import Counter
 import json
 
 def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_size, fraction=1.0, required_paths=[]):
-    # metadata = pd.read_csv(metadata_path)
+    metadata = pd.read_csv(metadata_path)
 
     data_paths = list(Path(dataset_path).glob(pattern))
+    data_paths += required_paths
     # if fraction < 1.0:
     #     data_paths = np.random.choice(list(data_paths), int(len(list(data_paths))*fraction), replace=False)
     #     if len(required_paths) > 0:
@@ -42,6 +43,13 @@ def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_s
         df['json_element'] = df['json_element'].apply(json.loads)
         df = pd.json_normalize(df['json_element'])
         data = pd.concat([data, df])
+
+    if 'label' not in data.columns:
+        data['object_id'] = pd.to_numeric(data['object_id'])
+
+        data = data.merge(metadata, on='object_id', how='left')
+        data = data[['object_id', 'times_wv', 'lightcurve', 'true_target']]
+        data = data.rename(columns={'true_target': 'label'})
 
     for i in data['label'].unique():
         label_data = data[data['label'] == i]

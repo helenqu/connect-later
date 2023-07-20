@@ -3,6 +3,8 @@ import transformers
 from datasets import load_dataset
 from transformers import InformerConfig, InformerForPrediction, PretrainedConfig
 from accelerate import Accelerator, DistributedDataParallelKwargs
+from torch.cuda.amp import autocast
+
 
 import torch
 from torch.optim import AdamW
@@ -31,7 +33,7 @@ WANDB_DIR = "/pscratch/sd/h/helenqu/sn_transformer/wandb"
 CACHE_DIR = "/pscratch/sd/h/helenqu/huggingface_datasets_cache"
 CHECKPOINT_DIR = "/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/checkpoints"
 
-def get_dataset(data_dir, data_subset_file=None):
+def get_dataset(data_dir, data_subset_file=None, force_redownload=False):
     print(f"data subset file: {data_subset_file}")
     if data_subset_file is not None:
         print("data subset file not none")
@@ -40,7 +42,10 @@ def get_dataset(data_dir, data_subset_file=None):
     else:
         data_subset = [str(x) for x in Path(data_dir).glob("*.jsonl")] # this includes original training set
     print(f"using data subset: {data_subset}")
-    dataset = load_dataset(data_dir, data_files={"train": data_subset}, cache_dir=CACHE_DIR)#, download_mode="force_redownload")
+    if not force_redownload:
+        dataset = load_dataset(data_dir, data_files={"train": data_subset}, cache_dir=CACHE_DIR)
+    else:
+        dataset = load_dataset(data_dir, data_files={"train": data_subset}, cache_dir=CACHE_DIR, download_mode="force_redownload")
     print(f"loading dataset {'from file ' if data_subset_file is not None else ''}with {len(dataset['train'])} examples")
 
     return dataset
@@ -89,43 +94,20 @@ def prepare_model_input(batch, device, config, mask):
 
     return model_inputs
 
-def train(args, base_config, add_config=None):
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
-    # accelerator = Accelerator()
-
-    device = accelerator.device
-
-    if args.log_level:
-        print(f"setting log level to {args.log_level}")
-        log_levels = {"debug": 10, "info": 20, "warning": 30, "error": 40, "critical": 50}
-        transformers.logging.set_verbosity(log_levels[args.log_level])
-        datasets.logging.set_verbosity(log_levels[args.log_level])
-        datasets.logging.enable_propagation()
-
-    if not args.dry_run and accelerator.is_main_process:
-        print("initializing wandb")
-        wandb.init(project="informer", name="masked", config=base_config, dir=WANDB_DIR) #mode="offline")
-        add_config = wandb.config
-    print(add_config)
-    config = base_config
-    if add_config is not None:
-        config.update(add_config)
-    print(config)
-
-    dataset = get_dataset(args.data_dir, data_subset_file=config['data_subset_file'])
-
+def setup_model_config(args, config):
+    # model config computes certain properties, can't config.update these
     model_config = InformerConfig(
         # in the multivariate setting, input_size is the number of variates in the time series per time step
         input_size=6 if not args.fourier_pe else 2,
         # prediction length:
         prediction_length=config['prediction_length'],
         # context length:
-        context_length=config['context_length'],
+        context_length=config['context_length'] if not args.mask else 300,
         # lags value copied from 1 week before:
         lags_sequence=[0],
         # we'll add 5 time features ("hour_of_day", ..., and "age"):
         num_time_features=len(config['time_features']) + 1 if not args.fourier_pe else 2, #wavelength + time
+        num_static_real_features=0 if not args.redshift else 1,
 
         # informer params:
         dropout=config['dropout_rate'],
@@ -136,7 +118,7 @@ def train(args, base_config, add_config=None):
         scaling=config['scaling'],
         has_labels=False,
         mask=args.mask,
-        mask_probability=config['mask_probability'],
+        mask_probability=0.8,
     )
 
     addl_config = {}
@@ -156,6 +138,36 @@ def train(args, base_config, add_config=None):
         addl_config['PE_hidden_dim'] = config['PE_hidden_dim']
 
     model_config.update(addl_config)
+
+    return model_config
+
+def train(args, base_config, add_config=None):
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(mixed_precision='bf16', kwargs_handlers=[ddp_kwargs])
+    # accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    # accelerator = Accelerator()
+
+    device = accelerator.device
+
+    if args.log_level:
+        print(f"setting log level to {args.log_level}")
+        log_levels = {"debug": 10, "info": 20, "warning": 30, "error": 40, "critical": 50}
+        transformers.logging.set_verbosity(log_levels[args.log_level])
+        datasets.logging.set_verbosity(log_levels[args.log_level])
+        datasets.logging.enable_propagation()
+
+    if not args.dry_run and accelerator.is_main_process:
+        print("initializing wandb")
+        wandb.init(project="informer", name=base_config['wandb_name'], config=base_config, dir=WANDB_DIR) #mode="offline")
+        add_config = wandb.config
+    config = base_config
+    if add_config is not None:
+        config.update(add_config)
+    print(config)
+
+    dataset = get_dataset(args.data_dir, data_subset_file=config['data_subset_file'])
+
+    model_config = setup_model_config(args, config)
 
     if args.fourier_pe and args.mask:
         print("instantiating model with fourier PE and masking")
@@ -195,7 +207,6 @@ def train(args, base_config, add_config=None):
         num_batches_per_epoch=config['num_batches_per_epoch'],
         shuffle_buffer_length=1_000_000,
         allow_padding=config['allow_padding'],
-        cache_data=False
     )
 
     model, optimizer, train_dataloader = accelerator.prepare(
@@ -206,36 +217,40 @@ def train(args, base_config, add_config=None):
     if args.load_checkpoint:
         accelerator.load_state(args.load_checkpoint)
 
-    num_training_steps = config['num_epochs'] * config['num_batches_per_epoch']
-    progress_bar = tqdm(range(num_training_steps))
+    progress_bar = tqdm(range(config['num_steps']))
+
+    def cycle(dataloader):
+        while True:
+            for x in dataloader:
+                yield x
+            # TODO shuffle the dataloader?
 
     start_time = datetime.now()
     model.train()
-    for epoch in range(config['num_epochs']):
-        cumulative_loss = 0
-        for idx, batch in enumerate(train_dataloader):
-            if idx == 0:
-                print(batch['past_values'][0])
-                print(batch['labels'][0])
-            optimizer.zero_grad()
+    for idx, batch in enumerate(cycle(train_dataloader)):
+        if idx == config['num_steps']:
+            break
+        optimizer.zero_grad()
 
-            outputs = model(**prepare_model_input(batch, device, model_config, args.mask))
-            loss = outputs.loss
+        # with autocast(dtype=torch.bfloat16):
+        outputs = model(**prepare_model_input(batch, device, model_config, args.mask))
+        loss = outputs.loss
 
-            # Backpropagation
-            accelerator.backward(loss)
-            optimizer.step()
-            progress_bar.update(1)
-            cumulative_loss += loss.item()
+        # Backpropagation
+        accelerator.backward(loss)
+        optimizer.step()
+        progress_bar.update(1)
 
-        print(f"epoch {epoch}: loss = {cumulative_loss / idx}")
+        if not args.dry_run and accelerator.is_main_process:
+            wandb.log({"loss": loss.item()})
 
-        if epoch % 10 == 0:
-            ckpt_dir = Path(CHECKPOINT_DIR) / f"checkpoint_{start_time.strftime('%Y-%m-%d_%H:%M:%S')}_epoch_{epoch}"
+        if idx % 1_000 == 0:
+            print(f"step {idx}: loss = {loss.item()}")
+
+        if idx % 5_000 == 0:
+            ckpt_dir = Path(CHECKPOINT_DIR) / f"checkpoint_{config['wandb_name']}_{start_time.strftime('%Y-%m-%d_%H:%M:%S')}_step_{idx}"
             print(f"saving ckpt at {ckpt_dir}")
             accelerator.save_state(output_dir=ckpt_dir)
-        if not args.dry_run and accelerator.is_main_process:
-            wandb.log({"loss": cumulative_loss / idx})
 
     if args.save_model:
         model = accelerator.unwrap_model(model)
@@ -244,7 +259,7 @@ def train(args, base_config, add_config=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True)
-    parser.add_argument("--num_epochs", type=int, required=True)
+    parser.add_argument("--num_steps", type=int, required=True)
     parser.add_argument("--save_model", type=str)
     parser.add_argument("--load_model", type=str)
     parser.add_argument("--load_checkpoint", type=str)
@@ -261,22 +276,23 @@ if __name__ == "__main__":
     with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/hyperparameters.yml") as f:
         sweep_config = yaml.safe_load(f)
 
-    config['num_epochs'] = args.num_epochs
+    config['num_steps'] = args.num_steps
+    config['num_eval_steps'] = 1_000
     config['weight_decay'] = 0.01
     config['dropout_rate'] = 0.2
-    config['lr'] = 0.0001
-    config['batch_size'] = 1024
-    config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/raw/plasticc_raw_examples/single_test_file.txt"
+    config['lr'] = 0.0001 # was 0.0001 with batch size 1024
+    config['batch_size'] = 512
+    # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/raw/plasticc_raw_examples/just_train_set.txt"
     # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/examples/15_percent_filepaths.txt"
     config['scaling'] = None
-    # config["context_length"] = 170
-    # config["prediction_length"] = 10
-    # config["num_epochs"] = args.num_epochs
+    config["context_length"] = 170
+    config["prediction_length"] = 10
     config["allow_padding"] = True
-    config["mask_probability"] = 0.5
+    # config["mask_probability"] = 0.5
 
+    config['wandb_name'] = 'masked_prob_0.8_no_distil_float32'
     train(args, config)
-    # sweep_id = wandb.sweep(sweep_config, project="pretraining-fourier-sweep")
+    # sweep_id = wandb.sweep(sweep_config, project="pretraining-masked-0.8-sweep")
     # sweep_id = "helenqu/pretraining-20k-sweep/x52pxocd"
     # sweep_id = "helenqu/pretraining-all-sweep/w674xnm8"
     # wandb.agent(sweep_id, partial(train, args, config), count=5)

@@ -7,7 +7,9 @@ from transformers.time_series_utils import StudentTOutput, NormalOutput, Negativ
 
 import torch
 import torch.nn as nn
-from torch.nn import BCEWithLogitsLoss, MSELoss, functional as F
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, functional as F
+
+from transformer_uda.dataset_preprocess_raw import create_network_inputs
 
 import pdb
 import numpy as np
@@ -547,13 +549,14 @@ class InformerFourierPEForPrediction(InformerPreTrainedModel):
             static_features=outputs.static_features,
         )
 
-class MaskedInformerFourierPE(InformerPreTrainedModel):
+class MaskedInformerFourierPE(InformerModel):
     def __init__(self, config):
         super().__init__(config)
         self.config = config
+        self.config.distil = False # no convolutions
 
-        self.encoder = InformerEncoderFourierPE(config)
-        self.decoder = MaskedInformerDecoder(config)
+        self.encoder = InformerEncoderFourierPE(self.config)
+        self.decoder = MaskedInformerDecoder(self.config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -601,10 +604,12 @@ class MaskedInformerFourierPE(InformerPreTrainedModel):
 
         masked_lm_loss = None
         if labels is not None:
-            loss_fct = MSELoss()  # 0 = unmasked token, mask from loss
+            loss_fct = MSELoss(reduction='sum')  # 0 = unmasked token, mask from loss
             mask = labels.view(-1) != 0 # flattened
-            masked_predictions = prediction_scores.view(-1) * mask
-            masked_lm_loss = loss_fct(masked_predictions, labels.view(-1))
+            #TODO: maybe multiply with attention mask to avoid computing loss on padding
+            masked_predictions = prediction_scores.view(-1) * mask # multiply by 0 where mask array is 0, 1 where mask array is nonzero
+            masked_lm_loss = loss_fct(masked_predictions, labels.view(-1)) # MSE(0,0) = 0 for masked predictions
+            masked_lm_loss = masked_lm_loss / mask.sum()
 
         if not return_dict:
             output = (prediction_scores,) + outputs[2:]
@@ -622,12 +627,18 @@ class MaskedInformerDecoder(InformerPreTrainedModel):
         super().__init__(config)
         self.config = config
 
-        self.decoder = nn.Linear(config.hidden_size, config.context_length) # hijacking "context_length" to mean size of input sequence
+        # self.num_conv_layers = 8
+        # self.conv_layer = InformerConvLayer(config.hidden_size)
+        self.decoder = nn.Linear(config.hidden_size, 1) # hijacking "context_length" to mean size of input sequence
 
         # Initialize weights and apply final processing
         self.post_init()
 
     def forward(self, values):
+        # input: [batch_size, ??, hidden_size], ?? bc encoder conv layer divides by 2 but random dropping out of layers
+        # want to get back to [batch_size, 1, context_length]
+        # for _ in range(self.num_conv_layers):
+        #     values = self.conv_layer(values)
         return self.decoder(values)
 
 class InformerForSequenceClassification(InformerPreTrainedModel):
@@ -637,15 +648,23 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         print(f"num labels: {self.num_labels}")
         self.config = config
 
-        self.informer = InformerModel(config) if not config.fourier_pe else InformerFourierPEModel(config)
+        if config.fourier_pe and config.mask:
+            config.distil = False
+            self.encoder = InformerEncoderFourierPE(config)
+            # self.informer = MaskedInformerFourierPE(config)
+        elif config.fourier_pe:
+            self.model = InformerFourierPEModel(config)
+        else:
+            self.model = InformerModel(config)
+
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         print(f"classifier dropout: {classifier_dropout}")
-        self.conv_layer = InformerConvLayer(config.hidden_size)
-        self.num_conv_layers = 7
-        self.pooler = nn.Linear(config.hidden_size, config.hidden_size)
-        self.pooler_activation = nn.Tanh()
+        # self.conv_layer = InformerConvLayer(config.hidden_size)
+        # self.num_conv_layers = 7
+        # self.pooler = nn.Linear(config.hidden_size, config.hidden_size)
+        # self.pooler_activation = nn.Tanh()
         self.dropout = nn.Dropout(classifier_dropout)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
@@ -678,39 +697,63 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.informer(
-            past_values=past_values,
-            past_time_features=past_time_features,
-            past_observed_mask=past_observed_mask,
-            future_values=future_values,
-            future_time_features=future_time_features,
-            static_categorical_features=static_categorical_features,
-            static_real_features=static_real_features,
-            decoder_attention_mask=decoder_attention_mask,
-            head_mask=head_mask,
-            decoder_head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            encoder_outputs=encoder_outputs,
-            past_key_values=past_key_values,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            return_dict=return_dict,
-        )
+        if self.config.mask:
+            #TODO: should encapsulate this preprocessing + encoder into its own class
+            transformer_inputs, loc, scale, static_feat = create_network_inputs(
+                config=self.config,
+                past_values=past_values,
+                past_time_features=past_time_features,
+                past_observed_mask=past_observed_mask,
+                static_categorical_features=static_categorical_features,
+                static_real_features=static_real_features,
+            )
 
-        decoder_output = outputs.last_hidden_state
+            outputs = self.encoder(
+                inputs_embeds=transformer_inputs,
+                head_mask=head_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
 
-        for _ in range(self.num_conv_layers):
-            decoder_output = self.conv_layer(decoder_output)
-        pooled_output = self.pooler_activation(self.pooler(decoder_output))
+            decoder_output = outputs.last_hidden_state
+            pooled_output = torch.mean(decoder_output, dim=1, keepdim=True) # average over time dimension
+
+        else:
+            outputs = self.model(
+                past_values=past_values,
+                past_time_features=past_time_features,
+                past_observed_mask=past_observed_mask,
+                future_values=future_values,
+                future_time_features=future_time_features,
+                static_categorical_features=static_categorical_features,
+                static_real_features=static_real_features,
+                decoder_attention_mask=decoder_attention_mask,
+                head_mask=head_mask,
+                decoder_head_mask=decoder_head_mask,
+                cross_attn_head_mask=cross_attn_head_mask,
+                encoder_outputs=encoder_outputs,
+                past_key_values=past_key_values,
+                output_hidden_states=output_hidden_states,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                return_dict=return_dict,
+            )
+
+            decoder_output = outputs.last_hidden_state
+
+            pooled_output = torch.mean(decoder_output, dim=1, keepdim=True) # average over time dimension
+            # for _ in range(self.num_conv_layers):
+            #     decoder_output = self.conv_layer(decoder_output)
+            # pooled_output = self.pooler_activation(self.pooler(decoder_output))
+
         pooled_output = self.dropout(pooled_output)
-
         logits = self.classifier(pooled_output)
-        print(f"logits shape before: {logits.shape}")
-        # logits = logits.expand(-1, 1, -1) # middle dim is 0, so expand to 1
 
-        loss_fn = BCEWithLogitsLoss(weight=weights) if weights is not None else BCEWithLogitsLoss()
-        loss = loss_fn(logits, torch.unsqueeze(F.one_hot(labels, num_classes=self.num_labels).float(), 1))
+        # loss_fn = BCEWithLogitsLoss(weight=weights) if weights is not None else BCEWithLogitsLoss()
+        loss_fn = CrossEntropyLoss(weight=weights) if weights is not None else CrossEntropyLoss()
+        # loss = loss_fn(logits, torch.unsqueeze(F.one_hot(labels, num_classes=self.num_labels).float(), 1))
+        loss = loss_fn(logits.squeeze(), labels)
 
         if not return_dict:
             output = (logits,) + outputs[2:]
@@ -719,6 +762,7 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=outputs.encoder_hidden_states,
-            attentions=outputs.encoder_attentions,
+            # hidden_states=outputs.encoder_hidden_states,
+            hidden_states=outputs.last_hidden_state,
+            # attentions=outputs.encoder_attentions,
         )

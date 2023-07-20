@@ -75,9 +75,9 @@ parameters:
   #   values:
   #     - True
       # - False
-  num_epochs: 
+  num_steps:
     values:
-      - 100
+      - 5_000
   # prediction_length:
   #   values:
   #     - 10
