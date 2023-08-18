@@ -8,8 +8,16 @@ import pdb
 from collections import Counter
 import json
 
-def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_size, fraction=1.0, required_paths=[]):
-    metadata = pd.read_csv(metadata_path)
+def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_size, required_paths=[]):
+    if '.csv' in Path(metadata_path).suffixes:
+        metadata = pd.read_csv(metadata_path)
+    elif '.h5' in Path(metadata_path).suffixes:
+        store = pd.HDFStore(metadata_path)
+        metadata = pd.read_hdf(store, 'metadata')
+        metadata.reset_index(inplace=True)
+        metadata = metadata.rename({'index': 'object_id', 'class': 'true_target'})
+    else:
+        raise ValueError(f"Unknown metadata file type {Path(metadata_path).suffix}")
 
     data_paths = list(Path(dataset_path).glob(pattern))
     data_paths += required_paths
@@ -32,9 +40,9 @@ def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_s
 
     train = pd.DataFrame()
     val = pd.DataFrame()
-    test = pd.DataFrame()
 
     data = pd.DataFrame()
+    print(f"Reading files from {data_paths}")
     for path in data_paths:
         with open(path, "r") as f:
             lines = f.read().splitlines()
@@ -43,33 +51,35 @@ def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_s
         df['json_element'] = df['json_element'].apply(json.loads)
         df = pd.json_normalize(df['json_element'])
         data = pd.concat([data, df])
+        print(type(data['object_id'].iloc[0]))
 
     if 'label' not in data.columns:
-        data['object_id'] = pd.to_numeric(data['object_id'])
+        print("adding label to data")
+        if type(data['object_id'].iloc[0]) == str:
+            data['object_id_int'] = [int(x.split('_')[1]) for x in data['object_id']]
+        else:
+            data['object_id_int'] = pd.to_numeric(data['object_id'])
+        data['object_id_orig'] = data['object_id']
+        data = data.merge(metadata, left_on='object_id_int', right_on='object_id', how='left')
+        data = data[['object_id_orig', 'times_wv', 'lightcurve', 'true_target']]
+        data = data.rename(columns={'object_id_orig': 'object_id', 'true_target': 'label'})
 
-        data = data.merge(metadata, on='object_id', how='left')
-        data = data[['object_id', 'times_wv', 'lightcurve', 'true_target']]
-        data = data.rename(columns={'true_target': 'label'})
-
+    print("splitting data into train and val")
     for i in data['label'].unique():
         label_data = data[data['label'] == i]
         idxs_for_train = np.random.choice(range(len(label_data)), size=int(len(label_data)*train_size), replace=False)
-        idxs_for_val_test = np.setdiff1d(range(len(label_data)), idxs_for_train)
-        idxs_for_val = np.random.choice(idxs_for_val_test, size=int(len(idxs_for_val_test)/2), replace=False)
-        idxs_for_test = np.setdiff1d(idxs_for_val_test, idxs_for_val)
+        idxs_for_val = np.setdiff1d(range(len(label_data)), idxs_for_train)
 
         for_train = label_data.iloc[idxs_for_train]
         for_val = label_data.iloc[idxs_for_val]
-        for_test = label_data.iloc[idxs_for_test]
 
         train = pd.concat([train, for_train])
         val = pd.concat([val, for_val])
-        test = pd.concat([test, for_test])
 
     print(Counter(train['label']))
+    print("writing train, val sets")
     train.to_json(dataset_path / 'train.jsonl', orient='records', lines=True)
     val.to_json(dataset_path / 'val.jsonl', orient='records', lines=True)
-    test.to_json(dataset_path / 'test.jsonl', orient='records', lines=True)
         # with jsonlines.open(path) as reader:
         #     for obj in reader:
         #         if int(obj['object_id']) in train_ids:

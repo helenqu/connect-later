@@ -19,7 +19,7 @@ from collections import Counter
 from gluonts.time_feature import month_of_year
 
 from transformer_uda.dataset_preprocess import create_train_dataloader, create_test_dataloader
-from transformer_uda.dataset_preprocess_raw import create_train_dataloader_raw, create_test_dataloader_raw
+from transformer_uda.dataset_preprocess_raw import create_train_dataloader_raw, create_test_dataloader_raw, create_network_inputs
 from transformer_uda.informer_models import InformerForSequenceClassification
 from transformer_uda.huggingface_informer import get_dataset, setup_model_config
 
@@ -46,6 +46,61 @@ class EarlyStopper:
                 return True
         return False
 
+def linear_probe_sklearn(model, model_config, train_dataloader, device, batch_size):
+    num_training_batches = 1_000
+    progress_bar = tqdm(range(num_training_batches))
+
+    from sklearn.linear_model import LogisticRegression
+    from sklearn import preprocessing
+
+    X = np.zeros((batch_size*num_training_batches, model_config.d_model))
+    y = np.zeros((batch_size*num_training_batches,))
+
+    print("preparing training data for logreg linear probe")
+    # for idx, batch in enumerate(train_dataloader):
+    #     if idx == num_training_batches:
+    #         break
+
+    #     transformer_inputs, loc, scale, static_feat = create_network_inputs(
+    #         config=model_config,
+    #         past_values=batch['past_values'].to(device),
+    #         past_time_features=batch['past_time_features'].to(device),
+    #         past_observed_mask=batch['past_observed_mask'].to(device),
+    #         static_categorical_features=batch['static_categorical_features'].to(device) if 'static_categorical_features' in batch else None,
+    #         static_real_features=batch['static_real_features'].to(device) if 'static_real_features' in batch else None,
+    #     )
+
+    #     outputs = model.encoder(inputs_embeds=transformer_inputs)
+    #     pooled_output = torch.mean(outputs.last_hidden_state, dim=1, keepdim=True)
+
+    #     X[idx*batch_size:(idx+1)*batch_size] = pooled_output.squeeze().detach().cpu().numpy()
+    #     y[idx*batch_size:(idx+1)*batch_size] = batch['labels'].cpu().numpy()
+
+    #     progress_bar.update(1)
+
+    # np.save("/pscratch/sd/h/helenqu/plasticc/linear_probe_X.npy", X)
+    # np.save("/pscratch/sd/h/helenqu/plasticc/linear_probe_y.npy", y)
+    X = np.load("/pscratch/sd/h/helenqu/plasticc/linear_probe_X.npy")
+    y = np.load("/pscratch/sd/h/helenqu/plasticc/linear_probe_y.npy")
+
+    scaler = preprocessing.StandardScaler().fit(X)
+    X_scaled = scaler.transform(X)
+
+    for c in [0.01, 0.1, 1, 10, 100]:
+        linear_classifier = LogisticRegression(
+            multi_class='multinomial',
+            random_state=0,
+            C=c
+        )
+        linear_classifier.fit(X_scaled, y)
+        print(f"linear probe with C={c} has score {linear_classifier.score(X, y)}")
+    return linear_classifier.coef_
+
+def cycle(dataloader):
+    while True:
+        for x in dataloader:
+            yield x
+
 def train_loop(
         model: InformerForSequenceClassification,
         train_dataloader: torch.utils.data.DataLoader,
@@ -59,23 +114,17 @@ def train_loop(
         val_interval=100,
         log_interval=100,
         early_stopping=False,
-        save_ckpts=True,
         dry_run=False,
         class_weights=None,
+        save_model_path=None,
     ):
 
     progress_bar = tqdm(range(num_training_steps))
     abundances = Counter({k: 0 for k in range(15)})
-    save_model_path = Path(CHECKPOINTS_DIR)
     if early_stopping:
         early_stopper = EarlyStopper(patience=5, min_delta=0.05)
 
-    def cycle(dataloader):
-        while True:
-            for x in dataloader:
-                yield x
-
-    best_loss = np.inf
+    best_test_loss = np.inf
     for idx, batch in enumerate(cycle(train_dataloader)):
         model.train()
         metric= load_metric("accuracy")
@@ -87,7 +136,8 @@ def train_loop(
         if class_weights is not None:
             batch['weights'] = torch.tensor(class_weights)
         input_batch = {k: v.to(device) for k, v in batch.items() if k != 'objid'}
-        batch = {k: v.to(device) for k, v in batch.items()}
+        if idx == 0:
+            print(f"batch contents: {input_batch.keys()}")
         outputs = model(**input_batch)
         loss = outputs.loss
         loss.backward()
@@ -102,7 +152,7 @@ def train_loop(
         # abundances += Counter(batch['labels'].cpu().numpy())
 
         # accuracy = (100 * correct) / (idx * batch['labels'].shape[0])
-        accuracy = (predictions.flatten() == batch['labels']).sum().div(len(batch['labels'])).item()
+        accuracy = (predictions.flatten() == input_batch['labels']).sum().div(len(input_batch['labels'])).item()
         # if save_ckpts and cumulative_loss < best_loss:
         #     torch.save({
         #         'epoch': epoch,
@@ -131,6 +181,10 @@ def train_loop(
                 print("testing")
                 test_loss, test_accuracy, weighted_test_accuracy = validate(model, test_dataloader, device)
 
+                if test_loss < best_test_loss and save_model_path is not None:
+                    best_test_loss = test_loss
+                    save_model(model, optimizer, save_model_path)
+
                 metrics.update({
                     'val_loss': val_loss,
                     'val_accuracy': val_accuracy,
@@ -146,7 +200,7 @@ def train_loop(
 
     return model
 
-def run_training_stage(stage, model, train_dataloader, val_dataloader, test_dataloader, config, device, dry_run=False, class_weights=None):
+def run_training_stage(stage, model, train_dataloader, val_dataloader, test_dataloader, config, device, dry_run=False, class_weights=None, save_model_path=None):
     if class_weights is not None:
         print("Using class weights")
     else:
@@ -171,7 +225,7 @@ def run_training_stage(stage, model, train_dataloader, val_dataloader, test_data
     # model.load_state_dict(ckpt['model_state_dict'])
     # optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
-    num_training_steps = config['num_batches_per_epoch'] * config[f'{stage}_epochs']
+    num_training_steps = config[f'num_{stage}_steps']
     lr_scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
@@ -191,8 +245,8 @@ def run_training_stage(stage, model, train_dataloader, val_dataloader, test_data
         num_training_steps=num_training_steps,
         early_stopping=(stage == 'ft'),
         dry_run=dry_run,
-        save_ckpts=False,
-        class_weights=class_weights
+        class_weights=class_weights,
+        save_model_path=save_model_path,
     ), optimizer
 
 def validate(model, dataloader, device):
@@ -250,11 +304,12 @@ def save_model(model, optimizer, output_dir):
     model.save_pretrained(hf_model_dir)
 
 def setup_model_config_finetune(args, config):
+    # args.redshift is used inside here
     model_config = setup_model_config(args, config)
 
     finetune_config = {
         "has_labels": True,
-        "num_labels": 15,
+        "num_labels": 14, # TODO: remove the anomalous types
         "classifier_dropout": config['classifier_dropout'],
         "fourier_pe": config['fourier_pe'],
         # "balance": config['balance'],
@@ -266,7 +321,7 @@ def setup_model_config_finetune(args, config):
 
 def train(args, base_config, config=None):
     if not args.dry_run:
-        wandb.init(config=config, name="baseline_class_weights_better_test_set", project="finetuning-sweep-fourier-masked" if args.mask else "finetuning-sweep-fourier-pretrained", dir=WANDB_DIR)
+        wandb.init(config=config, name=args.wandb_name, project="finetuning-sweep-fourier-masked" if args.mask else "finetuning-sweep-fourier-pretrained", dir=WANDB_DIR)
         config = wandb.config
     if config:
         config.update(base_config)
@@ -276,12 +331,12 @@ def train(args, base_config, config=None):
 
     model_config = setup_model_config_finetune(args, config)
 
+    print(f"loading dataset from {config['dataset_path']}")
     dataset = load_dataset(str(config['dataset_path']), cache_dir=CACHE_DIR)#, download_mode='force_redownload')
-    unbalanced_dataset = load_dataset('/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels', cache_dir=CACHE_DIR)
-    abundances = Counter(unbalanced_dataset['train']['label'])
+    abundances = Counter(dataset['train']['label'])
     print(abundances)
     max_count = max(abundances.values())
-    class_weights = [abundances[i] / sum(abundances) for i in range(15)]  # weight upsampled balanced dataset by abundance
+    class_weights = [abundances[i] / sum(abundances) for i in range(model_config.num_labels)]  # weight upsampled balanced dataset by abundance
     if args.class_weights:
         print(f"Class weights applied: {class_weights}")
 
@@ -290,15 +345,16 @@ def train(args, base_config, config=None):
     dataloader_fn = create_train_dataloader_raw if config['fourier_pe'] else create_train_dataloader
     test_dataloader_fn = create_test_dataloader_raw if config['fourier_pe'] else create_test_dataloader
 
+    print(f"redshift: {args.redshift}")
     train_dataloader = dataloader_fn(
         config=model_config,
         dataset=dataset['train'],
         time_features=[month_of_year for x in config['time_features'] if 'month_of_year' in x],
         batch_size=config["batch_size"],
-        num_batches_per_epoch=config["num_batches_per_epoch"],
+        num_batches_per_epoch=4000, # TODO: this arg not used when masking, may not be necessary in general
         shuffle_buffer_length=1_000_000,
         allow_padding=False,
-        add_objid=True
+        # add_objid=True,
     )
     val_dataloader = test_dataloader_fn(
         config=model_config,
@@ -307,17 +363,18 @@ def train(args, base_config, config=None):
         batch_size=config["batch_size"],
         shuffle_buffer_length=1_000_000,
         compute_loss=True,# no longer optional for encoder-decoder latent space
-        allow_padding=False
+        allow_padding=False,
     )
     test_dataset = get_dataset(config['test_set_path'])#, force_redownload=True)#, data_subset_file=Path(config['test_set_path']) / "single_test_file.txt") # random file from plasticc test dataset
+    no_anomalies_dataset = test_dataset['train'].filter(lambda x: x['label'] < 14)
 
     test_dataloader = test_dataloader_fn(
         config=model_config,
-        dataset=test_dataset['train'],
+        dataset=no_anomalies_dataset,
         time_features=[month_of_year for x in config['time_features'] if 'month_of_year' in x],
         batch_size=config["batch_size"],
         compute_loss=True,
-        allow_padding=False
+        allow_padding=False,
     )
 
     if config.get('model_path') and not args.random_init:
@@ -338,9 +395,11 @@ def train(args, base_config, config=None):
     #     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
     model.train()
-    if config['lp_epochs'] > 0:
-        model, _ = run_training_stage('lp', model, train_dataloader, val_dataloader, test_dataloader, config, device, dry_run=args.dry_run, class_weights=class_weights if args.class_weights else None)
-    model, optimizer = run_training_stage('ft', model, train_dataloader, val_dataloader, test_dataloader, config, device, dry_run=args.dry_run, class_weights=class_weights if args.class_weights else None)
+    if config['num_lp_steps'] > 0:
+        model, _ = run_training_stage('lp', model, train_dataloader, val_dataloader, test_dataloader, config, device, dry_run=args.dry_run, class_weights=class_weights if args.class_weights else None, save_model_path=args.save_model)
+        # linear_weights = linear_probe_sklearn(model, model_config, train_dataloader, device, config['batch_size'])
+        # model.classifier.weight = torch.nn.Parameter(torch.tensor(linear_weights.astype(np.float32)).to(device))
+    model, optimizer = run_training_stage('ft', model, train_dataloader, val_dataloader, test_dataloader, config, device, dry_run=args.dry_run, class_weights=class_weights if args.class_weights else None, save_model_path=args.save_model)
 
     if args.save_model:
         save_model(model, optimizer, args.save_model)
@@ -370,13 +429,24 @@ if __name__ == "__main__":
     parser.add_argument('--test_set_path', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--fourier_pe', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--mask', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
-    parser.add_argument('--balance', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
+    parser.add_argument('--no_balance', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--redshift', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--class_weights', action='store_true')
+    parser.add_argument('--no_augment', action='store_true')
+    parser.add_argument('--num_lp_steps', type=int)
+    parser.add_argument('--num_ft_steps', type=int)
+    parser.add_argument('--wandb_name', type=str)
 
     args = parser.parse_args()
 
-    DATASET_PATH = Path('/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels') if not args.balance else Path('/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels_balanced')
+    if args.no_augment:
+        if args.no_balance:
+            DATASET_PATH = Path('/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels')
+        else:
+            DATASET_PATH = Path('/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels_balanced')
+    else:
+        DATASET_PATH = Path('/pscratch/sd/h/helenqu/plasticc/train_augmented_dataset')
+
     TEST_SET_PATH = Path('/pscratch/sd/h/helenqu/plasticc/raw_test_with_labels')
     with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml", "r") as f:
         config = yaml.safe_load(f)
@@ -384,19 +454,20 @@ if __name__ == "__main__":
     config['test_set_path'] = str(TEST_SET_PATH)
     config['model_path'] = args.load_model if args.load_model else None
     config['fourier_pe'] = args.fourier_pe
-    config['batch_size'] = 128
-    config['balance'] = args.balance
+    config['batch_size'] = 256 # batch size per gpu
+    config['balance'] = not args.no_balance
     config['mask'] = args.mask
     config['scaling'] = None
-    config['num_batches_per_epoch'] = 250 if not args.balance else 1000 # was 1000 but len(dataset) / 32 ~= 250
 
     with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_best_finetune_hyperparams.yml", 'r') as f:
         ft_config = yaml.safe_load(f)
     ft_config['weight_decay'] = 0.01
-    ft_config['lp_lr'] = 0.001
-    ft_config['lp_epochs'] = 0
-    ft_config['ft_epochs'] = 50
-    ft_config['ft_lr'] = 1e-5 # may need to be scaled by num processes
-    ft_config['classifier_dropout'] = 0.3
+    # ft_config['lp_lr'] = 1e-4 # for masked pretraining
+    ft_config['lp_lr'] = 1e-5
+    ft_config['num_lp_steps'] = args.num_lp_steps if args.num_lp_steps else 0
+    ft_config['num_ft_steps'] = args.num_ft_steps if args.num_ft_steps else 80_000
+    # ft_config['ft_lr'] = 4e-5# may need to be scaled by num processes
+    ft_config['ft_lr'] = 4e-6# may need to be scaled by num processes
+    ft_config['classifier_dropout'] = 0.3 if args.mask else 0.7
 
     train(args, config, ft_config)

@@ -266,22 +266,23 @@ if __name__ == "__main__":
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--fourier_pe", action="store_true")
     parser.add_argument("--mask", action="store_true")
+    parser.add_argument("--redshift", action="store_true")
     parser.add_argument("--log_level", type=str)
     parser.add_argument("--lr", type=float)
 
     args = parser.parse_args()
 
-    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml") as f:
+    # with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml") as f:
+    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/75M_masked_hyperparameters.yml") as f:
         config = yaml.safe_load(f)
     with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/hyperparameters.yml") as f:
         sweep_config = yaml.safe_load(f)
 
     config['num_steps'] = args.num_steps
-    config['num_eval_steps'] = 1_000
     config['weight_decay'] = 0.01
     config['dropout_rate'] = 0.2
     config['lr'] = 0.0001 # was 0.0001 with batch size 1024
-    config['batch_size'] = 512
+    config['batch_size'] = 256
     # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/raw/plasticc_raw_examples/just_train_set.txt"
     # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/examples/15_percent_filepaths.txt"
     config['scaling'] = None
@@ -290,7 +291,7 @@ if __name__ == "__main__":
     config["allow_padding"] = True
     # config["mask_probability"] = 0.5
 
-    config['wandb_name'] = 'masked_prob_0.8_no_distil_float32'
+    config['wandb_name'] = 'masked_69M'
     train(args, config)
     # sweep_id = wandb.sweep(sweep_config, project="pretraining-masked-0.8-sweep")
     # sweep_id = "helenqu/pretraining-20k-sweep/x52pxocd"

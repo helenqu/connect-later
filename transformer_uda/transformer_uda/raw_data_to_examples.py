@@ -9,16 +9,22 @@ from tqdm import tqdm
 import pdb
 
 LC_LENGTH = 300
+LSST_CHAR_BANDS = ['lsstu', 'lsstg', 'lsstr', 'lssti', 'lsstz', 'lssty']
 LSST_BANDS = [3670.69, 4826.85, 6223.24, 7545.98, 8590.90, 9710.28]
 
-def data_to_examples(infile, metadata_file, outfile):
+def data_to_examples(infile, outfile):
     lc_times_list = []
     with jsonlines.open(outfile, mode='w') as writer:
         print(f"Reading from {infile}, writing to {outfile}")
-        # lightcurves = Table.from_pandas(pd.read_csv(infile))
-        # lightcurves.add_index('object_id')
-        lightcurves = pd.read_csv(infile)
-        metadata = pd.read_csv(metadata_file)
+        if infile.suffix == '.csv':
+            lightcurves = pd.read_csv(infile)
+        elif infile.suffix == '.h5':
+            store = pd.HDFStore(infile)
+            lightcurves = pd.read_hdf(store, "observations")
+            store.close()
+            lightcurves = lightcurves.rename(columns={'time': 'mjd', 'flux_error': 'flux_err'})
+            lightcurves['passband'] = lightcurves['band'].apply(lambda x: LSST_CHAR_BANDS.index(x))
+
         ids_in_file = np.unique(lightcurves['object_id'])
         for objid in tqdm(ids_in_file):
             lc = lightcurves[lightcurves['object_id'] == objid].sort_values('mjd').reset_index(drop=True)
@@ -58,20 +64,19 @@ def data_to_examples(infile, metadata_file, outfile):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='create heatmaps from lightcurve data')
     parser.add_argument('--infiles', nargs='+', help='space-delimited list of input files', required=True)
-    parser.add_argument('--metadata_file', help='metadata file for given input files', required=True)
+    parser.add_argument('--outdir', help='space-delimited list of input files', required=True)
     args = parser.parse_args()
 
-    outdir = Path(args.infiles[0]).parent / "examples"
+    outdir = Path(args.outdir)
     if not outdir.exists():
         outdir.mkdir()
 
-    data_to_examples(args.infiles[0], args.metadata_file, outdir / (Path(args.infiles[0]).stem + ".jsonl"))
-    # procs = []
-    # for infile in args.infiles:
-    #     outfile = outdir / (Path(infile).stem + '.jsonl')
-    #     proc = mp.Process(target=data_to_examples, args=(infile, args.metadata_file, outfile))
-    #     proc.start()
-    #     procs.append(proc)
-    # for proc in procs:
-    #     proc.join() # wait until procs are done
-    #     print("procs done")
+    procs = []
+    for infile in args.infiles:
+        outfile = outdir / (Path(infile).stem + '.jsonl')
+        proc = mp.Process(target=data_to_examples, args=(Path(infile), outfile))
+        proc.start()
+        procs.append(proc)
+    for proc in procs:
+        proc.join() # wait until procs are done
+        print("procs done")

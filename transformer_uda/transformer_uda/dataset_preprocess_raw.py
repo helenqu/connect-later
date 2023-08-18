@@ -366,13 +366,22 @@ def create_test_dataloader_raw(
     )
 
     # we apply the transformations in test mode
+    # testing_instances = instance_sampler.apply(
+    #     transformed_data,
+    #     # if shuffle_buffer_length is None
+    #     # else PseudoShuffled(
+    #     #     transformed_data,
+    #     #     shuffle_buffer_length=shuffle_buffer_length,
+    #     # ),
+    #     is_train=False
+    # )
     testing_instances = instance_sampler.apply(
-        transformed_data,
-        # if shuffle_buffer_length is None
-        # else PseudoShuffled(
-        #     transformed_data,
-        #     shuffle_buffer_length=shuffle_buffer_length,
-        # ),
+        transformed_data
+        if shuffle_buffer_length is None
+        else PseudoShuffled(
+            transformed_data,
+            shuffle_buffer_length=shuffle_buffer_length,
+        ),
         is_train=False
     )
 
