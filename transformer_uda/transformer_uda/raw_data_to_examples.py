@@ -9,15 +9,21 @@ from tqdm import tqdm
 import pdb
 
 LC_LENGTH = 300
+SDSS_CHAR_BANDS = ['u', 'g', 'r', 'i', 'z']
+SDSS_BANDS = [3561.79, 4718.87, 6185.19, 7499.7, 8961.49]
 LSST_CHAR_BANDS = ['lsstu', 'lsstg', 'lsstr', 'lssti', 'lsstz', 'lssty']
 LSST_BANDS = [3670.69, 4826.85, 6223.24, 7545.98, 8590.90, 9710.28]
 
 def data_to_examples(infile, outfile):
+    is_sdss = 'sdss' in str(infile)
+
     lc_times_list = []
     with jsonlines.open(outfile, mode='w') as writer:
         print(f"Reading from {infile}, writing to {outfile}")
         if infile.suffix == '.csv':
             lightcurves = pd.read_csv(infile)
+            if is_sdss:
+                lightcurves['passband'] = [SDSS_CHAR_BANDS.index(x[2].lower()) for x in lightcurves['passband']] # output of snana is "b'g '"
         elif infile.suffix == '.h5':
             store = pd.HDFStore(infile)
             lightcurves = pd.read_hdf(store, "observations")
@@ -48,7 +54,7 @@ def data_to_examples(infile, outfile):
             # lc_wavelengths = lc['passband'].data
             lc_tensor =  lc[['flux', 'flux_err']].to_numpy()
             lc_times = lc['mjd'].values
-            lc_wavelengths = [LSST_BANDS[int(x)] for x in lc['passband'].values]
+            lc_wavelengths = [LSST_BANDS[int(x)] for x in lc['passband'].values] if not is_sdss else [SDSS_BANDS[int(x)] for x in lc['passband'].values]
             times_wv_tensor = np.vstack((lc_times, lc_wavelengths)).T
             # np.zeros((len(np.unique(lc_wavelengths)), len(lc_times)))
 

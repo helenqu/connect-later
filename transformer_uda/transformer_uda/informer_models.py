@@ -750,10 +750,16 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
 
-        # loss_fn = BCEWithLogitsLoss(weight=weights) if weights is not None else BCEWithLogitsLoss()
-        loss_fn = CrossEntropyLoss(weight=weights) if weights is not None else CrossEntropyLoss()
-        # loss = loss_fn(logits, torch.unsqueeze(F.one_hot(labels, num_classes=self.num_labels).float(), 1))
-        loss = loss_fn(logits.squeeze(), labels)
+        loss = None
+        if labels is not None:
+            if self.config.num_labels == 1 and self.config.regression:
+                loss_fn = MSELoss()
+            elif self.config.num_labels == 1:
+                labels = labels.float()
+                loss_fn = BCEWithLogitsLoss()
+            else:
+                loss_fn = CrossEntropyLoss(weight=weights) if weights is not None else CrossEntropyLoss()
+            loss = loss_fn(logits.squeeze(), labels)
 
         if not return_dict:
             output = (logits,) + outputs[2:]

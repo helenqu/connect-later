@@ -8,7 +8,10 @@ import pdb
 from collections import Counter
 import json
 
-def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_size, required_paths=[]):
+def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_size, required_paths=[], output_path=None):
+    if output_path is None:
+        output_path = dataset_path
+
     if '.csv' in Path(metadata_path).suffixes:
         metadata = pd.read_csv(metadata_path)
     elif '.h5' in Path(metadata_path).suffixes:
@@ -78,8 +81,8 @@ def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_s
 
     print(Counter(train['label']))
     print("writing train, val sets")
-    train.to_json(dataset_path / 'train.jsonl', orient='records', lines=True)
-    val.to_json(dataset_path / 'val.jsonl', orient='records', lines=True)
+    train.to_json(output_path / 'train.jsonl', orient='records', lines=True)
+    val.to_json(output_path / 'val.jsonl', orient='records', lines=True)
         # with jsonlines.open(path) as reader:
         #     for obj in reader:
         #         if int(obj['object_id']) in train_ids:

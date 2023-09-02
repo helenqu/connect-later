@@ -1,5 +1,5 @@
 # informer architecture hyperparams
-dropout_rate: 0.35
+dropout_rate: 0.2
 num_encoder_layers: 8
 num_decoder_layers: 8
 encoder_attention_heads: 12
@@ -16,12 +16,3 @@ lags:
 freq: "1M"
 time_features:
   - "month_of_year"
-
-# training hyperparams
-batch_size: 1024
-num_batches_per_epoch: 1000
-# weight_decay: 0.01
-lr: 1e-4
-
-allow_padding: True
-data_subset_file: null

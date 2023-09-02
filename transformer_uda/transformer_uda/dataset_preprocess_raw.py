@@ -31,7 +31,7 @@ from gluonts.torch.util import IterableDataset
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, set_seed
 from transformers.models.informer.modeling_informer import InformerMeanScaler, InformerStdScaler, InformerNOPScaler
 from datasets import concatenate_datasets
 
@@ -203,15 +203,13 @@ def create_instance_splitter(
 def create_train_dataloader_raw(
     config: PretrainedConfig,
     dataset,
-    time_features,
     batch_size: int,
-    num_batches_per_epoch: int,
-    shuffle_buffer_length: Optional[int] = None,
-    cache_data: Optional[bool] = True,
-    allow_padding: Optional[bool] = True,
     add_objid: Optional[bool] = False,
+    seed: Optional[int] = 42,
     **kwargs,
 ) -> Iterable:
+
+    set_seed(seed)
 
     PREDICTION_INPUT_NAMES = [
         "past_time_features",
@@ -241,87 +239,31 @@ def create_train_dataloader_raw(
     elif config.mask:
         TRAINING_INPUT_NAMES.append("mask_label")
 
-    if hasattr(config, "balance") and config.balance:
-        print("balancing training data")
-        abundances = Counter(dataset['labels'])
-        max_num = max(abundances.values())
-        for i in range(config.num_labels):
-            if abundances[i] == 0:
-                continue
-            tmp_dataset = dataset.filter(lambda x: x["labels"] == i)
-            dataset_for_type = dataset.filter(lambda x: x["labels"] == i)
-            num_multiples = ((max_num - abundances[i]) // abundances[i]) + 1
-            for j in range(num_multiples):
-                tmp_dataset = concatenate_datasets([tmp_dataset, dataset_for_type])
-            print(f"dataset for type {i} has {len(tmp_dataset)} examples")
-            tmp_dataset = tmp_dataset.select(range(max_num - abundances[i]))
-            dataset = concatenate_datasets([dataset, tmp_dataset])
-        print("balanced training data: {Counter(dataset['labels'])}")
-
     transformed_data = transform_raw_data(dataset, config)
+    transformed_data = transformed_data.shuffle(seed=seed).flatten_indices()
+    mask_probability = 0. if config.has_labels else config.mask_probability # don't mask for fine-tuning
 
-    # transformed_data = transformed_data.to_iterable_dataset(num_shards=128).shuffle(buffer_size=shuffle_buffer_length)
-    # if cache_data:
-    #     transformed_data = Cached(transformed_data)
-
-    # sampler = RandomSampler(transformed_data)
-
-    if config.mask:
-        transformed_data = transformed_data.shuffle(seed=111).flatten_indices()  # TODO add seed to args
-        mask_probability = 0. if config.has_labels else 0.8 # don't mask for fine-tuning
-        # print("debug: selecting 50 examples")
-        # transformed_data = transformed_data.select(range(50))
-        return DataLoader(
-            transformed_data,
-            batch_size=batch_size,
-            # sampler=sampler,
-            num_workers=1,
-            collate_fn=partial(masked_data_collator, mask_probability, TRAINING_INPUT_NAMES),
-            # shuffle=True
-        )
-
-    # we initialize a Training instance
-    instance_splitter = create_instance_splitter(config, "train", allow_padding) + SelectFields(
-        TRAINING_INPUT_NAMES #+ ["objid"]
+    return DataLoader(
+        transformed_data,
+        batch_size=batch_size,
+        num_workers=1,
+        collate_fn=partial(masked_data_collator, mask_probability, TRAINING_INPUT_NAMES),
     )
 
-    # the instance splitter will sample a window of
-    # context length + lags + prediction length (from all the possible transformed time series, 1 in our case)
-    # randomly from within the target time series and return an iterator.
-    training_instances = instance_splitter.apply(
-        Cyclic(transformed_data)
-        if shuffle_buffer_length is None
-        else PseudoShuffled(
-            Cyclic(transformed_data),
-            shuffle_buffer_length=shuffle_buffer_length,
-        )
-    )
-
-    # from the training instances iterator we now return a Dataloader which will
-    # continue to sample random windows for as long as it is called
-    # to return batch_size of the appropriate tensors ready for training!
-    return IterableSlice(
-        iter(
-            DataLoader(
-                IterableDataset(training_instances),
-                batch_size=batch_size,
-                **kwargs,
-            )
-        ),
-        num_batches_per_epoch,
-    )
 
 def create_test_dataloader_raw(
     config: PretrainedConfig,
     dataset,
-    time_features,
     batch_size: int,
+    seed: Optional[int] = 42,
     allow_padding: Optional[bool] = True,
     add_objid: Optional[bool] = False,
     compute_loss: Optional[bool] = False,
     shuffle_buffer_length: Optional[int] = None,
     **kwargs,
 ):
+    set_seed(seed)
+
     PREDICTION_INPUT_NAMES = [
         "past_time_features",
         "past_values",

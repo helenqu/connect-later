@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A m1727
 #SBATCH -C cpu
-#SBATCH -t 2:00:00
+#SBATCH -t 8:00:00
 #SBATCH -n 1
 #SBATCH -c 64
 #SBATCH -q shared
@@ -20,3 +20,8 @@ accelerate launch --num_processes=1 \
     --mask \
     --class_weights \
     --save_model /pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/finetuned_classification/pretrained_masked_weighted_lpft_augment \
+    --dataset_path /pscratch/sd/h/helenqu/plasticc/raw_baseline_self_labeled_test \
+    --wandb_name baseline_self_labeled \
+    --random_init \
+    --num_lp_steps 0 \
+    --num_ft_steps 100

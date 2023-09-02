@@ -24,6 +24,8 @@ MIXED_PRECISION=$([ "$MASK_BOOL" != "None" ] && echo "--mixed_precision=bf16" ||
 
 echo $RANDOM_INIT
 echo $LOAD_MODEL
+echo $MASK
+echo $WEIGHTS
 
 export SLURM_CPU_BIND="cores"
 export HF_HOME="/pscratch/sd/h/helenqu/huggingface_datasets_cache"
@@ -35,7 +37,6 @@ accelerate launch --num_processes=4 \
     ${MIXED_PRECISION} \
      /global/homes/h/helenqu/time_series_transformer/transformer_uda/finetune_classification.py \
     --fourier_pe \
-    --class_weights \
     --save_model $SAVE_MODEL \
     --num_lp_steps $LP_STEPS \
     --num_ft_steps $FT_STEPS \

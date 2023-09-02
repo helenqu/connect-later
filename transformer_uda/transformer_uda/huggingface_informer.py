@@ -1,6 +1,6 @@
 import datasets
 import transformers
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from transformers import InformerConfig, InformerForPrediction, PretrainedConfig
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from torch.cuda.amp import autocast
@@ -34,18 +34,19 @@ CACHE_DIR = "/pscratch/sd/h/helenqu/huggingface_datasets_cache"
 CHECKPOINT_DIR = "/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/models/checkpoints"
 
 def get_dataset(data_dir, data_subset_file=None, force_redownload=False):
-    print(f"data subset file: {data_subset_file}")
+    kwargs = {"cache_dir": CACHE_DIR}
     if data_subset_file is not None:
-        print("data subset file not none")
         with open(data_subset_file) as f:
             data_subset = [x.strip() for x in f.readlines()]
-    else:
-        data_subset = [str(x) for x in Path(data_dir).glob("*.jsonl")] # this includes original training set
-    print(f"using data subset: {data_subset}")
-    if not force_redownload:
-        dataset = load_dataset(data_dir, data_files={"train": data_subset}, cache_dir=CACHE_DIR)
-    else:
-        dataset = load_dataset(data_dir, data_files={"train": data_subset}, cache_dir=CACHE_DIR, download_mode="force_redownload")
+            print(f"using data subset: {data_subset}")
+
+            kwargs["data_files"] = {'train': data_subset}
+    if force_redownload:
+        kwargs["download_mode"] = "force_redownload"
+
+    dataset = load_dataset(data_dir, **kwargs)
+    # else:
+    #     data_subset = [str(x) for x in Path(data_dir).glob("*.jsonl")] # this includes original training set
     print(f"loading dataset {'from file ' if data_subset_file is not None else ''}with {len(dataset['train'])} examples")
 
     return dataset
@@ -97,28 +98,22 @@ def prepare_model_input(batch, device, config, mask):
 def setup_model_config(args, config):
     # model config computes certain properties, can't config.update these
     model_config = InformerConfig(
-        # in the multivariate setting, input_size is the number of variates in the time series per time step
-        input_size=6 if not args.fourier_pe else 2,
-        # prediction length:
-        prediction_length=config['prediction_length'],
-        # context length:
-        context_length=config['context_length'] if not args.mask else 300,
-        # lags value copied from 1 week before:
+        input_size=2,
+        prediction_length=0,
+        context_length=300,
         lags_sequence=[0],
-        # we'll add 5 time features ("hour_of_day", ..., and "age"):
-        num_time_features=len(config['time_features']) + 1 if not args.fourier_pe else 2, #wavelength + time
+        num_time_features=2, #wavelength + time
         num_static_real_features=0 if not args.redshift else 1,
 
         # informer params:
         dropout=config['dropout_rate'],
         encoder_layers=config['num_encoder_layers'],
         decoder_layers=config['num_decoder_layers'],
-        # project input from num_of_variates*len(lags_sequence)+num_time_features to:
         d_model=config['d_model'],
-        scaling=config['scaling'],
+        scaling=None,
         has_labels=False,
-        mask=args.mask,
-        mask_probability=0.8,
+        mask=True,
+        mask_probability=args.mask_probability,
     )
 
     addl_config = {}
@@ -165,7 +160,12 @@ def train(args, base_config, add_config=None):
         config.update(add_config)
     print(config)
 
-    dataset = get_dataset(args.data_dir, data_subset_file=config['data_subset_file'])
+    dataset = get_dataset(args.data_dir)
+    sdss_dataset = get_dataset("/pscratch/sd/h/helenqu/sdss/dataset")
+    full_sdss_dataset = concatenate_datasets([sdss_dataset['train'], sdss_dataset['validation'], sdss_dataset['test']])
+    full_sdss_dataset = full_sdss_dataset.remove_columns(['label', 'redshift'])
+    dataset['train'] = concatenate_datasets([dataset['train'], full_sdss_dataset])
+    print(f"added SDSS data, dataset size: {len(dataset)}")
 
     model_config = setup_model_config(args, config)
 
@@ -198,15 +198,10 @@ def train(args, base_config, add_config=None):
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
-    print(f"allow padding: {config['allow_padding']}, {type(config['allow_padding'])}")
     train_dataloader = dataloader_fn(
         config=model_config,
         dataset=dataset['train'],
-        time_features=[month_of_year] if 'month_of_year' in config['time_features'] else None, # not used in raw version
         batch_size=config['batch_size'],
-        num_batches_per_epoch=config['num_batches_per_epoch'],
-        shuffle_buffer_length=1_000_000,
-        allow_padding=config['allow_padding'],
     )
 
     model, optimizer, train_dataloader = accelerator.prepare(
@@ -269,11 +264,12 @@ if __name__ == "__main__":
     parser.add_argument("--redshift", action="store_true")
     parser.add_argument("--log_level", type=str)
     parser.add_argument("--lr", type=float)
+    parser.add_argument("--mask_probability", default=0.6, type=float)
 
     args = parser.parse_args()
 
-    # with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml") as f:
-    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/75M_masked_hyperparameters.yml") as f:
+    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml") as f:
+    # with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/75M_masked_hyperparameters.yml") as f:
         config = yaml.safe_load(f)
     with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/hyperparameters.yml") as f:
         sweep_config = yaml.safe_load(f)
@@ -291,7 +287,7 @@ if __name__ == "__main__":
     config["allow_padding"] = True
     # config["mask_probability"] = 0.5
 
-    config['wandb_name'] = 'masked_69M'
+    config['wandb_name'] = 'masked_60%'
     train(args, config)
     # sweep_id = wandb.sweep(sweep_config, project="pretraining-masked-0.8-sweep")
     # sweep_id = "helenqu/pretraining-20k-sweep/x52pxocd"
