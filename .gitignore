@@ -1,8 +1,19 @@
-**/transformer_uda/wandb/*
-transformer_uda/wandb/
+# jupyter
 transformer_uda/.ipynb_checkpoints
+.ipynb_checkpoints
+
 __pycache__/
-**/slurm*
-figures/
-wandb/
+
+# packaging
 *.egg-info
+
+# old files
+OLD/
+figures/
+
+# wandb
+wandb/
+transformer_uda/wandb/
+
+# slurm outputs
+**/slurm*
