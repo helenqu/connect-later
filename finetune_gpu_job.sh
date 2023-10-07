@@ -35,7 +35,7 @@ source activate pytorch-1.13.1
 module load pytorch/1.13.1
 accelerate launch --num_processes=4 \
     ${MIXED_PRECISION} \
-     /global/homes/h/helenqu/time_series_transformer/transformer_uda/finetune_classification.py \
+     /global/homes/h/helenqu/time_series_transformer/finetune_classification.py \
     --fourier_pe \
     --save_model $SAVE_MODEL \
     --num_lp_steps $LP_STEPS \

@@ -1,4 +1,4 @@
-from datasets import load_dataset, load_metric
+from datasets import load_dataset, concatenate_datasets, load_metric
 from transformers import InformerConfig, PretrainedConfig, AdamW, get_scheduler, set_seed
 from accelerate import Accelerator, DistributedDataParallelKwargs
 
@@ -134,7 +134,8 @@ def train_loop(
             # print(f"training: {batch['labels']}")
         if class_weights is not None:
             batch['weights'] = torch.tensor(class_weights)
-        batch['labels'] = batch['labels'].type(torch.int64)
+        if not model_config.regression:
+            batch['labels'] = batch['labels'].type(torch.int64)
         input_batch = {k: v.to(device) for k, v in batch.items() if k != 'objid'}
         if idx == 0:
             print(f"batch contents: {input_batch.keys()}")
@@ -223,6 +224,7 @@ def run_training_stage(stage, model, model_config, train_dataloader, val_dataloa
             param.requires_grad = True
 
     print(f"weight decay: {config['weight_decay']}")
+    print(f"learning rate: {config[f'{stage}_lr']}")
     optimizer = AdamW(model.parameters(), lr=float(config[f'{stage}_lr']), weight_decay=config['weight_decay'])
 
     # ckpt = torch.load("/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/finetuned_classification/pretrained_500k_context_170/torch_model/model.pt")
@@ -272,7 +274,7 @@ def validate(model, model_config, dataloader, device):
     abundances = Counter({k: 0 for k in range(15)})
 
     for idx, batch in enumerate(dataloader):
-        batch['labels'] = batch['labels'].type(torch.int64)
+        # batch['labels'] = batch['labels'].type(torch.int64)
         batch = {k: v.to(device) for k, v in batch.items() if k != 'objid'}
         with torch.no_grad():
             outputs = model(**batch)
@@ -359,10 +361,23 @@ def train(args, base_config, config=None):
 
     print(f"loading dataset from {config['dataset_path']}")
     dataset = load_dataset(str(config['dataset_path']), cache_dir=CACHE_DIR)#, download_mode='force_redownload')
+
+    if args.self_training:
+        print("TODO: REMOVE - adding original training dataset")
+        if args.redshift_prediction:
+            orig_train = load_dataset("/pscratch/sd/h/helenqu/plasticc/train_augmented_redshift", cache_dir=CACHE_DIR)
+        else:
+            orig_train = load_dataset("/pscratch/sd/h/helenqu/plasticc/train_augmented_dataset", cache_dir=CACHE_DIR)
+            orig_train['train'] = orig_train['train'].remove_columns(['redshift'])
+        print(f"original training dataset size: {len(orig_train['train'])}")
+        dataset['train'] = concatenate_datasets([orig_train['train'], dataset['train']])
+        dataset['validation'] = orig_train['validation']
+    print(f"dataset sizes: {len(dataset['train'])}, {len(dataset['validation'])}")
+
     abundances = Counter(dataset['train']['label'])
-    print(abundances)
+    # print(abundances)
     max_count = max(abundances.values())
-    class_weights = [abundances[i] / sum(abundances) for i in range(model_config.num_labels)] if args.class_weights else None # weight upsampled balanced dataset by abundance
+    class_weights = [abundances[i] / sum(abundances.values()) for i in range(model_config.num_labels)] if args.class_weights else None # weight upsampled balanced dataset by abundance
     if args.class_weights:
         print(f"Class weights applied: {class_weights}")
 
@@ -380,7 +395,7 @@ def train(args, base_config, config=None):
         shuffle_buffer_length=1_000_000,
         allow_padding=False,
         seed=args.seed,
-        # add_objid=True,
+        add_objid=True,
     )
     val_dataloader = test_dataloader_fn(
         config=model_config,
@@ -426,13 +441,13 @@ def train(args, base_config, config=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='create heatmaps from lightcurve data')
     parser.add_argument('--dataset_path', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
+    parser.add_argument('--test_set_path', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--context_length', type=int, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--load_model', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--load_finetuned_model', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--save_model', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--dry_run', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--random_init', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
-    parser.add_argument('--test_set_path', type=str, help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--fourier_pe', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     parser.add_argument('--mask', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
     # parser.add_argument('--no_balance', action='store_true', help='absolute or relative path to your yml config file, i.e. "/user/files/create_heatmaps_config.yml"')
@@ -448,38 +463,39 @@ if __name__ == "__main__":
     parser.add_argument('--sdss', action='store_true')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--mask_probability', type=float, default=0.6)
+    parser.add_argument('--self_training', action='store_true')
 
     args = parser.parse_args()
 
     if args.sdss:
-        DATASET_PATH = '/pscratch/sd/h/helenqu/sdss/dataset'
+        DATASET_PATH = '/pscratch/sd/h/helenqu/sdss/spec_augmented_dataset'
     elif args.redshift_prediction:
         print("running redshift prediction")
         DATASET_PATH = '/pscratch/sd/h/helenqu/plasticc/train_augmented_redshift'
     elif args.no_augment:
-        if args.no_balance:
-            DATASET_PATH = '/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels'
-        else:
-            DATASET_PATH = '/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels_balanced'
+        DATASET_PATH = '/pscratch/sd/h/helenqu/plasticc/raw_train_with_labels'
     else:
         DATASET_PATH = '/pscratch/sd/h/helenqu/plasticc/train_augmented_dataset'
 
     TEST_SET_PATH = Path("/pscratch/sd/h/helenqu/plasticc")
-    if args.sdss or args.dataset_path:
+    if args.dataset_path:
+        print("using dataset path for test set unless --test_set_path is set")
         TEST_SET_PATH = None
+    elif args.sdss:
+        TEST_SET_PATH = "/pscratch/sd/h/helenqu/sdss/phot_dataset"
     elif args.redshift_prediction:
         TEST_SET_PATH = str(TEST_SET_PATH / "raw_test_redshift")
     else:
         TEST_SET_PATH = str(TEST_SET_PATH / 'raw_test_with_labels')
 
     if "69M" in args.wandb_name:
-        config_yml = "/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/75M_masked_hyperparameters.yml"
+        config_yml = "/global/homes/h/helenqu/time_series_transformer/configs/75M_masked_hyperparameters.yml"
     else:
-        config_yml = "/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml"
+        config_yml = "/global/homes/h/helenqu/time_series_transformer/configs/bigger_model_hyperparameters.yml"
     with open(config_yml, "r") as f:
         config = yaml.safe_load(f)
     config['dataset_path'] = DATASET_PATH if not args.dataset_path else args.dataset_path
-    config['test_set_path'] = TEST_SET_PATH
+    config['test_set_path'] = TEST_SET_PATH if not args.test_set_path else args.test_set_path
     config['model_path'] = args.load_model if args.load_model else None
     config['fourier_pe'] = args.fourier_pe
     config['batch_size'] = 256 # batch size per gpu
@@ -487,7 +503,7 @@ if __name__ == "__main__":
     config['mask'] = args.mask
     config['scaling'] = None
 
-    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_best_finetune_hyperparams.yml", 'r') as f:
+    with open("/global/homes/h/helenqu/time_series_transformer/configs/bigger_model_best_finetune_hyperparams.yml", 'r') as f:
         ft_config = yaml.safe_load(f)
     ft_config['weight_decay'] = 0.01
     ft_config['lp_lr'] = 1e-4 if args.lp_lr is None else args.lp_lr # for masked pretraining

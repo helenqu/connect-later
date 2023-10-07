@@ -89,7 +89,7 @@ def masked_data_collator(mask_probability, cols_to_keep, data):
         batch_key = key if key not in ['values', 'observed_mask', 'time_features'] else f"past_{key}"
         if batch_key not in cols_to_keep:
             continue
-        batch[batch_key] = torch.stack([torch.tensor(example[key]) for example in data])
+        batch[batch_key] = torch.stack([torch.tensor(example[key]) for example in data]) if key != 'objid' else [example[key] for example in data]
 
     labels = batch['past_values'][:, 0, :].clone() # only take flux values, should be [batch_size, 1, seq_len]
 
@@ -140,6 +140,10 @@ def transform_raw_data_example(config, example):
 def transform_raw_data(dataset, config: PretrainedConfig):
     # normalize time, data; create attention mask
     dataset = dataset.map(partial(transform_raw_data_example, config))
+    print(f"original dataset size: {len(dataset)}")
+    # filter out nans
+    dataset = dataset.filter(lambda example: not np.isnan(example['transposed_target']).any() and not np.isnan(example['transposed_times_wv']).any())
+    print(f"remove nans dataset size: {len(dataset)}")
     if not config.mask:
         dataset = dataset.add_column("start", [0] * len(dataset))
         dataset.set_transform(partial(transform_start_field, freq="1M"))
@@ -250,7 +254,6 @@ def create_train_dataloader_raw(
         collate_fn=partial(masked_data_collator, mask_probability, TRAINING_INPUT_NAMES),
     )
 
-
 def create_test_dataloader_raw(
     config: PretrainedConfig,
     dataset,
@@ -293,13 +296,13 @@ def create_test_dataloader_raw(
 
     transformed_data = transform_raw_data(dataset, config)
     if config.mask:
-        transformed_data = transformed_data.shuffle(seed=111).flatten_indices()  # TODO add seed to args
-        mask_probability = 0. if config.has_labels else 0.8 # don't mask for fine-tuning
+        transformed_data = transformed_data.shuffle(seed=seed).flatten_indices()  # TODO add seed to args
+        mask_probability = 0. if config.has_labels else config.mask_probability# don't mask for fine-tuning
         return DataLoader(
             transformed_data,
             batch_size=batch_size,
             # sampler=sampler,
-            num_workers=1,
+            num_workers=0,
             collate_fn=partial(masked_data_collator, mask_probability, PREDICTION_INPUT_NAMES)
         )
     # still passing in 'train' because otherwise it will take the last data point (no room for future values)

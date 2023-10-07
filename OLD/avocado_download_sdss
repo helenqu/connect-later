@@ -1,0 +1,117 @@
+#!/usr/bin/env python
+"""
+Download and preprocess the SDSS dataset. We convert the CSV files that the
+SDSS dataset comes in to PyTables HDF5 files that we can work with more
+easily. We also update header keywords to match the avocado naming convention.
+"""
+import pandas as pd
+import numpy as np
+from astropy.table import Table
+import pdb
+
+import avocado
+
+def update_sdss_metadata(metadata):
+    """Update raw SDSS metadata to follow the avocado conventions.
+
+    Parameters
+    ----------
+    metadata : pandas.DataFrame
+        The raw metadata
+
+    Returns
+    -------
+    updated_metadata : pandas.DataFrame
+        The updated metadata
+    """
+    # Rename columns in the metadata table to match the avocado conventions.
+    metadata_name_map = {
+        'SNTYPE': 'class',
+        'HOSTGAL_PHOTOZ_ERR': 'host_photoz_error',
+        'HOSTGAL_PHOTOZ': 'host_photoz',
+        'HOSTGAL_SPECZ': 'host_specz',
+        'REDSHIFT_FINAL': 'redshift',
+        'MWEBV': 'mwebv'
+    }
+    cols_to_keep = list(metadata_name_map.keys())
+    cols_to_keep.append('SNID')
+    print(cols_to_keep)
+    # Drop unused columns
+    metadata.drop(np.setdiff1d(metadata.columns, cols_to_keep), axis=1, inplace=True)
+
+    metadata.rename(metadata_name_map, axis=1, inplace=True)
+    print(metadata.columns)
+
+    # Update the object_id
+    new_object_id = ['sdss_%09d' % int(i) for i in metadata['SNID']]
+    metadata['object_id'] = new_object_id
+    metadata.drop('SNID', axis=1, inplace=True)
+
+    metadata.set_index('object_id', inplace=True)
+
+    return metadata
+
+def update_sdss_observations(observations):
+    """Update raw SDSS observations to follow the avocado conventions.
+
+    Parameters
+    ----------
+    observations : pandas.DataFrame
+        The raw observations
+
+    Returns
+    -------
+    updated_observations : pandas.DataFrame
+        The updated observations
+    """
+    observations['band'] = [x[2].lower() for x in observations['passband']]
+    observations.drop('passband', axis=1, inplace=True)
+
+    # Rename columns in the observations table to match the avocado standard.
+    observations_name_map = {
+        'mjd': 'time',
+        'flux_err': 'flux_error',
+    }
+    observations.rename(observations_name_map, axis=1, inplace=True)
+
+    # Update the object_id
+    new_object_id = observations['object_id'].apply("sdss_{:09d}".format)
+    observations['object_id'] = new_object_id
+    print(len(observations))
+
+    return observations
+
+def preprocess_observations(observations, output_path):
+    """Preprocess an observations table and write it out."""
+    obs = update_sdss_observations(observations)
+    avocado.utils.write_dataframe(output_path, obs, 'observations', append=True, index_chunk_column=False)
+
+if __name__ == "__main__":
+    print("\nPreprocessing the SDSS dataset...\n")
+    metadata = Table.read("/pscratch/sd/h/helenqu/sdss/SDSS_dataRelease-snana/SDSS_allCandidates+BOSS/SDSS_allCandidates+BOSS_HEAD.FITS", format='fits').to_pandas()
+    observations = pd.read_csv("/pscratch/sd/h/helenqu/sdss/lcdata.csv")
+    spec_subset = metadata['SNTYPE'] >= 110
+    spec_subset_ids = [int(x) for x in metadata[spec_subset]['SNID']]
+
+    train_path = '/pscratch/sd/h/helenqu/sdss/sdss_spec.h5'
+    test_path = '/pscratch/sd/h/helenqu/sdss/sdss_phot.h5'
+
+    print("Preprocessing training metadata...")
+    train_metadata = metadata[spec_subset]
+    train_metadata = update_sdss_metadata(train_metadata)
+    avocado.utils.write_dataframe(train_path, train_metadata, 'metadata',
+                                  overwrite=True)
+
+    print("Preprocessing test metadata...")
+    test_metadata = metadata[~spec_subset]
+    test_metadata = update_sdss_metadata(test_metadata)
+    avocado.utils.write_dataframe(test_path, test_metadata, 'metadata',
+                                  overwrite=True)
+
+    print("Preprocessing training observations...")
+    preprocess_observations(observations[observations['object_id'].isin(spec_subset_ids)], train_path)
+
+    print("Preprocessing test observations...")
+    preprocess_observations(observations[~observations['object_id'].isin(spec_subset_ids)], test_path)
+
+    print("\nDone!")
