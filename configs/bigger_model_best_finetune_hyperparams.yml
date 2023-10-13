@@ -1,6 +1,0 @@
-lp_epochs: 5
-lp_lr: 1e-2
-ft_epochs: 100
-ft_lr: 1e-4 # was 5e-4 but caused accuracy to plummet
-classifier_dropout: 0.3
-weight_decay: 0.01

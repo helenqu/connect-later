@@ -10,8 +10,9 @@ __pycache__/
 # old files
 OLD/
 figures/
-transformer_uda/old/
+connect_later/old/
 run_classification.sh
+configs/old/
 
 # wandb
 wandb/

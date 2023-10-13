@@ -1,6 +1,0 @@
-lp_epochs: 5
-lp_lr: 1e-2
-ft_epochs: 100
-ft_lr: 5e-5
-classifier_dropout: 0.35
-weight_decay: 0.01
