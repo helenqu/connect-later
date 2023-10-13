@@ -89,20 +89,17 @@ def masked_data_collator(mask_probability, cols_to_keep, data):
         batch_key = key if key not in ['values', 'observed_mask', 'time_features'] else f"past_{key}"
         if batch_key not in cols_to_keep:
             continue
-        batch[batch_key] = torch.stack([torch.tensor(example[key]) for example in data])
+        batch[batch_key] = torch.stack([torch.tensor(example[key]) for example in data]) if key != 'objid' else [example[key] for example in data]
 
     labels = batch['past_values'][:, 0, :].clone() # only take flux values, should be [batch_size, 1, seq_len]
 
     masked_indices = torch.bernoulli(torch.full(labels.shape, mask_probability)).bool().squeeze()
     labels[~masked_indices] = 0  # We only compute loss on masked tokens
-    # print(f"LABELS: {labels}")
 
     indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool().squeeze() & masked_indices
 
     # 10% of the time, we replace masked input tokens with random word
     indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool().squeeze() & masked_indices & ~indices_replaced
-    # shuffled_indices = torch.randint(len(batch['values']), batch['values'].shape)
-    # shuffled_words = batch['values'][shuffled_indices, :, :]
 
     indices_replaced = torch.tile(torch.unsqueeze(indices_replaced, 1), (1, 2, 1))
     indices_random = torch.tile(torch.unsqueeze(indices_random, 1), (1, 2, 1))
@@ -111,20 +108,13 @@ def masked_data_collator(mask_probability, cols_to_keep, data):
     batch['past_values'][indices_random] = torch.rand(batch['past_values'][indices_random].shape)
     batch['past_values'] = torch.transpose(batch['past_values'], 1, 2)
     batch['past_time_features'] = torch.transpose(batch['past_time_features'], 1, 2)
-    #shuffled_words[indices_random]
 
     if 'mask_label' in cols_to_keep:
         batch['mask_label'] = labels
 
     return batch
 
-def transform_start_field(batch, freq):
-    # batch["start"] = [convert_to_pandas_period(date, freq) for date in batch["start"]]
-    #TODO: threw out start field, otherwise have to convert from mjd
-    batch["start"] = [convert_to_pandas_period("2010-12-29", freq) for example in batch]
-    return batch
-
-def transform_raw_data_example(config, example):
+def transform_raw_data_example(example):
     # was 300 x 2, need to be 2 x 300 (first dim is channel)
     example['transposed_target'] = np.array(example['target']).T
     example['transposed_times_wv'] = np.array(example['times_wv']).T
@@ -132,17 +122,15 @@ def transform_raw_data_example(config, example):
     example = create_attention_mask(example)
     example = normalize_by_channel(example, "transposed_times_wv")
     example = normalize_all(example, "transposed_target") # normalize flux, flux_err by max overall
-    # masking comes after normalization bc mask value is 0
-    # if config.mask:
-    #     example = mask(example, config.mask_fraction if hasattr(config, "mask_fraction") else 0.5)
     return example
 
-def transform_raw_data(dataset, config: PretrainedConfig):
+def transform_raw_data(dataset):
     # normalize time, data; create attention mask
-    dataset = dataset.map(partial(transform_raw_data_example, config))
-    if not config.mask:
-        dataset = dataset.add_column("start", [0] * len(dataset))
-        dataset.set_transform(partial(transform_start_field, freq="1M"))
+    dataset = dataset.map(transform_raw_data_example)
+    print(f"original dataset size: {len(dataset)}")
+    # filter out nans
+    dataset = dataset.filter(lambda example: not np.isnan(example['transposed_target']).any() and not np.isnan(example['transposed_times_wv']).any())
+    print(f"remove nans dataset size: {len(dataset)}")
     # have to swap out these field names because can't change dataset field shapes in place
     dataset = dataset.remove_columns(["target", "times_wv"])
     dataset = dataset.rename_column("transposed_target", "target")
@@ -155,50 +143,10 @@ def transform_raw_data(dataset, config: PretrainedConfig):
                 "attention_mask": "observed_mask",
             }
 
-    # dataset['times_wv'] = np.asarray(dataset['times_wv'])
-    # dataset['target'] = np.asarray(dataset['target'])
-    # dataset['attention_mask'] = np.asarray(dataset['attention_mask'])
     dataset = dataset.rename_columns(name_mapping)
     dataset = dataset.with_format('np')
 
     return dataset
-
-def create_instance_splitter(
-    config: PretrainedConfig,
-    mode: str,
-    allow_padding: Optional[bool] = True,
-    train_sampler: Optional[InstanceSampler] = None,
-    validation_sampler: Optional[InstanceSampler] = None,
-) -> Transformation:
-    assert mode in ["train", "validation", "test"]
-
-    instance_sampler = {
-        "train": train_sampler
-        or ExpectedNumInstanceSampler(
-            num_instances=1.0,
-            min_past=0 if allow_padding else config.context_length,
-            min_future=config.prediction_length,
-        ),
-        "validation": validation_sampler
-        or ValidationSplitSampler(
-            min_past=0 if allow_padding else config.context_length,
-            min_future=config.prediction_length
-        ),
-        "test": TestSplitSampler(),
-    }[mode]
-
-    print(f"instance splitter created with context length {config.context_length}, lags {config.lags_sequence}")
-
-    return InstanceSplitter(
-        target_field="values",
-        is_pad_field=FieldName.IS_PAD,
-        start_field=FieldName.START,
-        forecast_start_field=FieldName.FORECAST_START,
-        instance_sampler=instance_sampler,
-        past_length=config.context_length + max(config.lags_sequence),
-        future_length=config.prediction_length,
-        time_series_fields=["time_features", "observed_mask"],
-    )
 
 def create_train_dataloader_raw(
     config: PretrainedConfig,
@@ -206,7 +154,6 @@ def create_train_dataloader_raw(
     batch_size: int,
     add_objid: Optional[bool] = False,
     seed: Optional[int] = 42,
-    **kwargs,
 ) -> Iterable:
 
     set_seed(seed)
@@ -239,7 +186,7 @@ def create_train_dataloader_raw(
     elif config.mask:
         TRAINING_INPUT_NAMES.append("mask_label")
 
-    transformed_data = transform_raw_data(dataset, config)
+    transformed_data = transform_raw_data(dataset)
     transformed_data = transformed_data.shuffle(seed=seed).flatten_indices()
     mask_probability = 0. if config.has_labels else config.mask_probability # don't mask for fine-tuning
 
@@ -250,17 +197,13 @@ def create_train_dataloader_raw(
         collate_fn=partial(masked_data_collator, mask_probability, TRAINING_INPUT_NAMES),
     )
 
-
 def create_test_dataloader_raw(
     config: PretrainedConfig,
     dataset,
     batch_size: int,
     seed: Optional[int] = 42,
-    allow_padding: Optional[bool] = True,
     add_objid: Optional[bool] = False,
     compute_loss: Optional[bool] = False,
-    shuffle_buffer_length: Optional[int] = None,
-    **kwargs,
 ):
     set_seed(seed)
 
@@ -291,45 +234,15 @@ def create_test_dataloader_raw(
             "future_observed_mask",
         ]
 
-    transformed_data = transform_raw_data(dataset, config)
-    if config.mask:
-        transformed_data = transformed_data.shuffle(seed=111).flatten_indices()  # TODO add seed to args
-        mask_probability = 0. if config.has_labels else 0.8 # don't mask for fine-tuning
-        return DataLoader(
-            transformed_data,
-            batch_size=batch_size,
-            # sampler=sampler,
-            num_workers=1,
-            collate_fn=partial(masked_data_collator, mask_probability, PREDICTION_INPUT_NAMES)
-        )
-    # still passing in 'train' because otherwise it will take the last data point (no room for future values)
-    instance_sampler = create_instance_splitter(config, "train", allow_padding) + SelectFields(
-        PREDICTION_INPUT_NAMES
-    )
-
-    # we apply the transformations in test mode
-    # testing_instances = instance_sampler.apply(
-    #     transformed_data,
-    #     # if shuffle_buffer_length is None
-    #     # else PseudoShuffled(
-    #     #     transformed_data,
-    #     #     shuffle_buffer_length=shuffle_buffer_length,
-    #     # ),
-    #     is_train=False
-    # )
-    testing_instances = instance_sampler.apply(
-        transformed_data
-        if shuffle_buffer_length is None
-        else PseudoShuffled(
-            transformed_data,
-            shuffle_buffer_length=shuffle_buffer_length,
-        ),
-        is_train=False
-    )
-
-    # This returns a Dataloader which will go over the dataset once.
+    transformed_data = transform_raw_data(dataset)
+    transformed_data = transformed_data.shuffle(seed=seed).flatten_indices()  # TODO add seed to args
+    mask_probability = 0. if config.has_labels else config.mask_probability# don't mask for fine-tuning
     return DataLoader(
-        IterableDataset(testing_instances), batch_size=batch_size, **kwargs
+        transformed_data,
+        batch_size=batch_size,
+        # sampler=sampler,
+        num_workers=0,
+        collate_fn=partial(masked_data_collator, mask_probability, PREDICTION_INPUT_NAMES)
     )
 
 def create_network_inputs(

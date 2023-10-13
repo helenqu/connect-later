@@ -1,5 +1,22 @@
-**/transformer_uda/wandb/*
-transformer_uda/transformer_uda/wandb/
-transformer_uda/transformer_uda/.ipynb_checkpoints
+# jupyter
+transformer_uda/.ipynb_checkpoints
+.ipynb_checkpoints
+
 __pycache__/
+
+# packaging
+*.egg-info
+
+# old files
+OLD/
+figures/
+transformer_uda/old/
+run_classification.sh
+
+# wandb
+wandb/
+transformer_uda/wandb/
+
+# slurm outputs
 **/slurm*
+logs/

@@ -8,6 +8,54 @@ import pdb
 from collections import Counter
 import json
 
+def split_augmented_jsonl_dataset(augmented_dataset_path, original_dataset_path, pattern, train_size, required_paths=[], output_path=None):
+    if output_path is None:
+        output_path = Path(augmented_dataset_path)
+
+    data_paths = list(Path(augmented_dataset_path).glob(pattern))
+    data_paths += required_paths
+
+    data = pd.DataFrame()
+    print(f"Reading files from {data_paths}")
+    for path in data_paths:
+        with open(path, "r") as f:
+            lines = f.read().splitlines()
+        df = pd.DataFrame(lines)
+        df.columns = ['json_element']
+        df['json_element'] = df['json_element'].apply(json.loads)
+        df = pd.json_normalize(df['json_element'])
+        data = pd.concat([data, df])
+        print(type(data['object_id'].iloc[0]))
+
+        if type(data['object_id'].iloc[0]) == str and len(data['object_id'].iloc[0].split('_')) > 1:
+            data['object_id_int'] = [int(x.split('_')[1]) for x in data['object_id']]
+        else:
+            data['object_id_int'] = pd.to_numeric(data['object_id'])
+
+    print(f"Reading files from {data_paths}")
+    with open(original_dataset_path, "r") as f:
+        lines = f.read().splitlines()
+    df = pd.DataFrame(lines)
+    df.columns = ['json_element']
+    df['json_element'] = df['json_element'].apply(json.loads)
+    orig_data = pd.json_normalize(df['json_element'])
+    orig_data['object_id'] = pd.to_numeric(orig_data['object_id'])
+
+    all_ids = data['object_id_int'].unique()
+    num_ids = len(all_ids)
+    train_ids = np.random.choice(all_ids, size=int(num_ids*train_size), replace=False)
+
+    val_ids = np.setdiff1d(all_ids, train_ids)
+
+    print(f"selected {len(train_ids)} train ids, {len(val_ids)} val ids")
+
+    train = data[data['object_id_int'].isin(train_ids)]
+    val = orig_data[orig_data['object_id'].isin(val_ids)]
+    print(f"actual sizes: train {len(train)}, val {len(val)}")
+
+    train.to_json(output_path / 'train.jsonl', orient='records', lines=True)
+    val.to_json(output_path / 'val.jsonl', orient='records', lines=True)
+
 def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_size, required_paths=[], output_path=None):
     if output_path is None:
         output_path = dataset_path
@@ -58,7 +106,7 @@ def split_jsonl_dataset_into_files(metadata_path, dataset_path, pattern, train_s
 
     if 'label' not in data.columns:
         print("adding label to data")
-        if type(data['object_id'].iloc[0]) == str:
+        if type(data['object_id'].iloc[0]) == str and len(data['object_id'].iloc[0].split('_')) > 1:
             data['object_id_int'] = [int(x.split('_')[1]) for x in data['object_id']]
         else:
             data['object_id_int'] = pd.to_numeric(data['object_id'])

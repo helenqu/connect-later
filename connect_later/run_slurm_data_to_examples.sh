@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A m1727
 #SBATCH -C cpu
-#SBATCH -t 10:00:00
+#SBATCH -t 1:00:00
 #SBATCH -n 1
 #SBATCH -c 32
 #SBATCH -q shared

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, functional as F
 
-from transformer_uda.dataset_preprocess_raw import create_network_inputs
+from connect_later.dataset_preprocess_raw import create_network_inputs
 
 import pdb
 import numpy as np
@@ -422,133 +422,6 @@ class InformerFourierPEModel(InformerModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-class InformerFourierPEForPrediction(InformerPreTrainedModel):
-    def __init__(self, config):
-        super().__init__(config)
-        self.config = config
-        self.model = InformerFourierPEModel(config)
-
-        if config.distribution_output == "student_t":
-            self.distribution_output = StudentTOutput(dim=config.input_size)
-        elif config.distribution_output == "normal":
-            self.distribution_output = NormalOutput(dim=config.input_size)
-        elif config.distribution_output == "negative_binomial":
-            self.distribution_output = NegativeBinomialOutput(dim=config.input_size)
-        else:
-            raise ValueError(f"Unknown distribution output {config.distribution_output}")
-
-        self.parameter_projection = self.distribution_output.get_parameter_projection(self.model.config.d_model)
-        self.target_shape = self.distribution_output.event_shape
-
-        if config.loss == "nll":
-            self.loss = nll
-        else:
-            raise ValueError(f"Unknown loss function {config.loss}")
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def output_params(self, dec_output):
-        return self.parameter_projection(dec_output)
-
-    def get_encoder(self):
-        return self.model.get_encoder()
-
-    def get_decoder(self):
-        return self.model.get_decoder()
-
-    @torch.jit.ignore
-    def output_distribution(self, params, loc=None, scale=None, trailing_n=None) -> torch.distributions.Distribution:
-        sliced_params = params
-        if trailing_n is not None:
-            sliced_params = [p[:, -trailing_n:] for p in params]
-        return self.distribution_output.distribution(sliced_params, loc=loc, scale=scale)
-
-    def forward(
-        self,
-        past_values: torch.Tensor,
-        past_time_features: torch.Tensor,
-        past_observed_mask: torch.Tensor,
-        static_categorical_features: Optional[torch.Tensor] = None,
-        static_real_features: Optional[torch.Tensor] = None,
-        future_values: Optional[torch.Tensor] = None,
-        future_time_features: Optional[torch.Tensor] = None,
-        future_observed_mask: Optional[torch.Tensor] = None,
-        decoder_attention_mask: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        decoder_head_mask: Optional[torch.Tensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
-        encoder_outputs: Optional[List[torch.FloatTensor]] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        use_cache: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Seq2SeqTSModelOutput, Tuple]:
-
-        # copied from InformerForPrediction.forward
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        if future_values is not None:
-            use_cache = False
-
-        outputs = self.model(
-            past_values=past_values,
-            past_time_features=past_time_features,
-            past_observed_mask=past_observed_mask,
-            static_categorical_features=static_categorical_features,
-            static_real_features=static_real_features,
-            future_values=future_values,
-            future_time_features=future_time_features,
-            decoder_attention_mask=decoder_attention_mask,
-            head_mask=head_mask,
-            decoder_head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            encoder_outputs=encoder_outputs,
-            past_key_values=past_key_values,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            return_dict=return_dict,
-        )
-
-        prediction_loss = None
-        params = None
-        if future_values is not None:
-            params = self.output_params(outputs[0])  # outputs.last_hidden_state
-            # loc is 3rd last and scale is 2nd last output
-            distribution = self.output_distribution(params, loc=outputs[-3], scale=outputs[-2])
-
-            loss = self.loss(distribution, future_values)
-
-            if future_observed_mask is None:
-                future_observed_mask = torch.ones_like(future_values)
-
-            if len(self.target_shape) == 0:
-                loss_weights = future_observed_mask
-            else:
-                loss_weights, _ = future_observed_mask.min(dim=-1, keepdim=False)
-
-            prediction_loss = weighted_average(loss, weights=loss_weights)
-
-        if not return_dict:
-            outputs = ((params,) + outputs[1:]) if params is not None else outputs[1:]
-            return ((prediction_loss,) + outputs) if prediction_loss is not None else outputs
-
-        return Seq2SeqTSPredictionOutput(
-            loss=prediction_loss,
-            params=params,
-            past_key_values=outputs.past_key_values,
-            decoder_hidden_states=outputs.decoder_hidden_states,
-            decoder_attentions=outputs.decoder_attentions,
-            cross_attentions=outputs.cross_attentions,
-            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-            encoder_hidden_states=outputs.encoder_hidden_states,
-            encoder_attentions=outputs.encoder_attentions,
-            loc=outputs.loc,
-            scale=outputs.scale,
-            static_features=outputs.static_features,
-        )
-
 class MaskedInformerFourierPE(InformerModel):
     def __init__(self, config):
         super().__init__(config)
@@ -627,18 +500,12 @@ class MaskedInformerDecoder(InformerPreTrainedModel):
         super().__init__(config)
         self.config = config
 
-        # self.num_conv_layers = 8
-        # self.conv_layer = InformerConvLayer(config.hidden_size)
-        self.decoder = nn.Linear(config.hidden_size, 1) # hijacking "context_length" to mean size of input sequence
+        self.decoder = nn.Linear(config.hidden_size, 1)
 
         # Initialize weights and apply final processing
         self.post_init()
 
     def forward(self, values):
-        # input: [batch_size, ??, hidden_size], ?? bc encoder conv layer divides by 2 but random dropping out of layers
-        # want to get back to [batch_size, 1, context_length]
-        # for _ in range(self.num_conv_layers):
-        #     values = self.conv_layer(values)
         return self.decoder(values)
 
 class InformerForSequenceClassification(InformerPreTrainedModel):
@@ -651,7 +518,6 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         if config.fourier_pe and config.mask:
             config.distil = False
             self.encoder = InformerEncoderFourierPE(config)
-            # self.informer = MaskedInformerFourierPE(config)
         elif config.fourier_pe:
             self.model = InformerFourierPEModel(config)
         else:
@@ -661,10 +527,6 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         print(f"classifier dropout: {classifier_dropout}")
-        # self.conv_layer = InformerConvLayer(config.hidden_size)
-        # self.num_conv_layers = 7
-        # self.pooler = nn.Linear(config.hidden_size, config.hidden_size)
-        # self.pooler_activation = nn.Tanh()
         self.dropout = nn.Dropout(classifier_dropout)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
@@ -743,9 +605,6 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
             decoder_output = outputs.last_hidden_state
 
             pooled_output = torch.mean(decoder_output, dim=1, keepdim=True) # average over time dimension
-            # for _ in range(self.num_conv_layers):
-            #     decoder_output = self.conv_layer(decoder_output)
-            # pooled_output = self.pooler_activation(self.pooler(decoder_output))
 
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
@@ -768,7 +627,5 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            # hidden_states=outputs.encoder_hidden_states,
             hidden_states=outputs.last_hidden_state,
-            # attentions=outputs.encoder_attentions,
         )

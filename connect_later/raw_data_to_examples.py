@@ -14,8 +14,8 @@ SDSS_BANDS = [3561.79, 4718.87, 6185.19, 7499.7, 8961.49]
 LSST_CHAR_BANDS = ['lsstu', 'lsstg', 'lsstr', 'lssti', 'lsstz', 'lssty']
 LSST_BANDS = [3670.69, 4826.85, 6223.24, 7545.98, 8590.90, 9710.28]
 
-def data_to_examples(infile, outfile):
-    is_sdss = 'sdss' in str(infile)
+def data_to_examples(infile, outfile, args=None):
+    is_sdss = args.sdss if args else False
 
     lc_times_list = []
     with jsonlines.open(outfile, mode='w') as writer:
@@ -25,13 +25,17 @@ def data_to_examples(infile, outfile):
             if is_sdss:
                 lightcurves['passband'] = [SDSS_CHAR_BANDS.index(x[2].lower()) for x in lightcurves['passband']] # output of snana is "b'g '"
         elif infile.suffix == '.h5':
-            store = pd.HDFStore(infile)
-            lightcurves = pd.read_hdf(store, "observations")
-            store.close()
+            lightcurves = pd.read_hdf(infile, "observations")
             lightcurves = lightcurves.rename(columns={'time': 'mjd', 'flux_error': 'flux_err'})
+
+        if is_sdss:
+            lightcurves['passband'] = lightcurves['band'].apply(lambda x: SDSS_CHAR_BANDS.index(x))
+        else:
             lightcurves['passband'] = lightcurves['band'].apply(lambda x: LSST_CHAR_BANDS.index(x))
 
         ids_in_file = np.unique(lightcurves['object_id'])
+        # print(f"taking {len(ids_in_file) // 2} ids out of {len(ids_in_file)}")
+        # ids_to_take = np.random.choice(ids_in_file, size=len(ids_in_file) // 2, replace=False)
         for objid in tqdm(ids_in_file):
             lc = lightcurves[lightcurves['object_id'] == objid].sort_values('mjd').reset_index(drop=True)
             # lc.sort('mjd')
@@ -71,6 +75,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='create heatmaps from lightcurve data')
     parser.add_argument('--infiles', nargs='+', help='space-delimited list of input files', required=True)
     parser.add_argument('--outdir', help='space-delimited list of input files', required=True)
+    parser.add_argument('--sdss', action='store_true', help='whether to use sdss data')
     args = parser.parse_args()
 
     outdir = Path(args.outdir)
@@ -80,7 +85,7 @@ if __name__ == '__main__':
     procs = []
     for infile in args.infiles:
         outfile = outdir / (Path(infile).stem + '.jsonl')
-        proc = mp.Process(target=data_to_examples, args=(Path(infile), outfile))
+        proc = mp.Process(target=data_to_examples, args=(Path(infile), outfile, args))
         proc.start()
         procs.append(proc)
     for proc in procs:
