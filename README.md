@@ -2,7 +2,7 @@
 
 ## Astronomical Time-Series Datasets
 ### Datasets
-will be released on the HuggingFace Hub!
+https://huggingface.co/datasets/helenqu/astro-classification-redshifts
 ### Pretraining
 ```
 bash run_pretrain.sh /path/to/dataset /path/to/save/model wandb_run_name
