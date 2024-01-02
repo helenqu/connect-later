@@ -14,6 +14,9 @@ connect_later/old/
 run_classification.sh
 configs/old/
 
+# other packages
+targeted_augs/
+
 # wandb
 wandb/
 transformer_uda/wandb/
