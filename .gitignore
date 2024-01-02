@@ -3,6 +3,8 @@ transformer_uda/.ipynb_checkpoints
 .ipynb_checkpoints
 
 __pycache__/
+connect_later/__pycache__/
+connectivity/__pycache__/
 
 # packaging
 *.egg-info
@@ -10,6 +12,11 @@ __pycache__/
 # old files
 OLD/
 figures/
+configs/old/
+connect_later/old/
+
+# other packages
+targeted_augs/
 
 # wandb
 wandb/

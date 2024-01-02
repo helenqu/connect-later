@@ -14,12 +14,9 @@ import yaml
 import shutil
 from collections import Counter
 
-from gluonts.time_feature import month_of_year
-
-from transformer_uda.dataset_preprocess import create_train_dataloader, create_test_dataloader
-from transformer_uda.dataset_preprocess_raw import create_train_dataloader_raw, create_test_dataloader_raw
-from transformer_uda.informer_models import InformerForSequenceClassification
-from transformer_uda.huggingface_informer import get_dataset, setup_model_config
+from connect_later.dataset_preprocess_raw import create_train_dataloader_raw, create_test_dataloader_raw
+from connect_later.informer_models import InformerForSequenceClassification
+from connect_later.huggingface_informer import get_dataset, setup_model_config
 
 WANDB_DIR = "/pscratch/sd/h/helenqu/sn_transformer/wandb/finetuning"
 CACHE_DIR = "/pscratch/sd/h/helenqu/huggingface_datasets_cache"
@@ -139,6 +136,7 @@ def train_loop(
         input_batch = {k: v.to(device) for k, v in batch.items() if k != 'objid'}
         if idx == 0:
             print(f"batch contents: {input_batch.keys()}")
+            print(input_batch['past_values'])
         outputs = model(**input_batch)
         loss = outputs.loss
         loss.backward()
@@ -278,6 +276,8 @@ def validate(model, model_config, dataloader, device):
         batch = {k: v.to(device) for k, v in batch.items() if k != 'objid'}
         with torch.no_grad():
             outputs = model(**batch)
+        if type(outputs.loss) != torch.Tensor:
+            pdb.set_trace()
 
         cumulative_loss += outputs.loss.item()
         logits = outputs.logits
@@ -383,40 +383,35 @@ def train(args, base_config, config=None):
 
     print(f"fourier pe? {config['fourier_pe']}, mask? {config['mask']}")
 
-    dataloader_fn = create_train_dataloader_raw if config['fourier_pe'] else create_train_dataloader
     test_dataloader_fn = create_test_dataloader_raw if config['fourier_pe'] else create_test_dataloader
 
     print(f"redshift: {args.redshift}")
-    train_dataloader = dataloader_fn(
-        config=model_config,
+    train_dataloader = create_train_dataloader_raw(
         dataset=dataset['train'],
         batch_size=config["batch_size"],
-        num_batches_per_epoch=4000, # TODO: this arg not used when masking, may not be necessary in general
-        shuffle_buffer_length=1_000_000,
-        allow_padding=False,
         seed=args.seed,
         add_objid=True,
+        has_labels=True,
+        masked_ft=args.masked_ft,
+        mask_probability=args.mask_probability
     )
-    val_dataloader = test_dataloader_fn(
-        config=model_config,
+    val_dataloader = create_test_dataloader_raw(
         dataset=dataset['validation'],
         batch_size=config["batch_size"],
-        shuffle_buffer_length=1_000_000,
         compute_loss=True,# no longer optional for encoder-decoder latent space
-        allow_padding=False,
         seed=args.seed,
+        has_labels=True,
     )
     test_dataset = get_dataset(config['test_set_path'])['train'] if config['test_set_path'] is not None else dataset['test']
     #, force_redownload=True)#, data_subset_file=Path(config['test_set_path']) / "single_test_file.txt") # random file from plasticc test dataset
     no_anomalies_dataset = test_dataset.filter(lambda x: x['label'] < 14)
 
     test_dataloader = test_dataloader_fn(
-        config=model_config,
         dataset=no_anomalies_dataset,
         batch_size=config["batch_size"],
         compute_loss=True,
-        allow_padding=False,
         seed=args.seed,
+        has_labels=True
     )
 
     if config.get('model_path') and not args.random_init:
@@ -463,7 +458,9 @@ if __name__ == "__main__":
     parser.add_argument('--sdss', action='store_true')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--mask_probability', type=float, default=0.6)
+    parser.add_argument('--masked_ft', action='store_true')
     parser.add_argument('--self_training', action='store_true')
+    parser.add_argument('--uniformity_loss_weight', type=float, default=0)
 
     args = parser.parse_args()
 
@@ -498,7 +495,7 @@ if __name__ == "__main__":
     config['test_set_path'] = TEST_SET_PATH if not args.test_set_path else args.test_set_path
     config['model_path'] = args.load_model if args.load_model else None
     config['fourier_pe'] = args.fourier_pe
-    config['batch_size'] = 256 # batch size per gpu
+    config['batch_size'] = 128 # batch size per gpu
     # config['balance'] = not args.no_balance
     config['mask'] = args.mask
     config['scaling'] = None

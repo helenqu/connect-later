@@ -7,27 +7,27 @@ from functools import partial
 
 from typing import Optional, Iterable
 
-from gluonts.dataset.field_names import FieldName
-from gluonts.transform import (
-    AddAgeFeature,
-    AddObservedValuesIndicator,
-    AddTimeFeatures,
-    AsNumpyArray,
-    Chain,
-    ExpectedNumInstanceSampler,
-    InstanceSplitter,
-    RemoveFields,
-    SelectFields,
-    SetField,
-    TestSplitSampler,
-    Transformation,
-    ValidationSplitSampler,
-    VstackFeatures,
-    RenameFields,
-)
-from gluonts.transform.sampler import InstanceSampler
-from gluonts.itertools import Cached, Cyclic, IterableSlice, PseudoShuffled
-from gluonts.torch.util import IterableDataset
+# from gluonts.dataset.field_names import FieldName
+# from gluonts.transform import (
+#     AddAgeFeature,
+#     AddObservedValuesIndicator,
+#     AddTimeFeatures,
+#     AsNumpyArray,
+#     Chain,
+#     ExpectedNumInstanceSampler,
+#     InstanceSplitter,
+#     RemoveFields,
+#     SelectFields,
+#     SetField,
+#     TestSplitSampler,
+#     Transformation,
+#     ValidationSplitSampler,
+#     VstackFeatures,
+#     RenameFields,
+# )
+# from gluonts.transform.sampler import InstanceSampler
+# from gluonts.itertools import Cached, Cyclic, IterableSlice, PseudoShuffled
+# from gluonts.torch.util import IterableDataset
 
 import torch
 from torch.utils.data import DataLoader
@@ -93,7 +93,7 @@ def masked_data_collator(mask_probability, cols_to_keep, data):
 
     labels = batch['past_values'][:, 0, :].clone() # only take flux values, should be [batch_size, 1, seq_len]
 
-    masked_indices = torch.bernoulli(torch.full(labels.shape, mask_probability)).bool().squeeze()
+    masked_indices = torch.bernoulli(torch.full(labels.shape, mask_probability)).bool()#.squeeze()
     labels[~masked_indices] = 0  # We only compute loss on masked tokens
     # print(f"LABELS: {labels}")
 
@@ -124,7 +124,7 @@ def transform_start_field(batch, freq):
     batch["start"] = [convert_to_pandas_period("2010-12-29", freq) for example in batch]
     return batch
 
-def transform_raw_data_example(config, example):
+def transform_raw_data_example(example):
     # was 300 x 2, need to be 2 x 300 (first dim is channel)
     example['transposed_target'] = np.array(example['target']).T
     example['transposed_times_wv'] = np.array(example['times_wv']).T
@@ -137,16 +137,13 @@ def transform_raw_data_example(config, example):
     #     example = mask(example, config.mask_fraction if hasattr(config, "mask_fraction") else 0.5)
     return example
 
-def transform_raw_data(dataset, config: PretrainedConfig):
+def transform_raw_data(dataset):
     # normalize time, data; create attention mask
-    dataset = dataset.map(partial(transform_raw_data_example, config))
+    dataset = dataset.map(transform_raw_data_example)
     print(f"original dataset size: {len(dataset)}")
     # filter out nans
     dataset = dataset.filter(lambda example: not np.isnan(example['transposed_target']).any() and not np.isnan(example['transposed_times_wv']).any())
     print(f"remove nans dataset size: {len(dataset)}")
-    if not config.mask:
-        dataset = dataset.add_column("start", [0] * len(dataset))
-        dataset.set_transform(partial(transform_start_field, freq="1M"))
     # have to swap out these field names because can't change dataset field shapes in place
     dataset = dataset.remove_columns(["target", "times_wv"])
     dataset = dataset.rename_column("transposed_target", "target")
@@ -155,7 +152,7 @@ def transform_raw_data(dataset, config: PretrainedConfig):
     # remove/rename fields
     name_mapping = {
                 "times_wv": "time_features",
-                FieldName.TARGET: "values",
+                "target": "values",
                 "attention_mask": "observed_mask",
             }
 
@@ -167,148 +164,121 @@ def transform_raw_data(dataset, config: PretrainedConfig):
 
     return dataset
 
-def create_instance_splitter(
-    config: PretrainedConfig,
-    mode: str,
-    allow_padding: Optional[bool] = True,
-    train_sampler: Optional[InstanceSampler] = None,
-    validation_sampler: Optional[InstanceSampler] = None,
-) -> Transformation:
-    assert mode in ["train", "validation", "test"]
+# def create_instance_splitter(
+#     config: PretrainedConfig,
+#     mode: str,
+#     allow_padding: Optional[bool] = True,
+#     train_sampler: Optional[InstanceSampler] = None,
+#     validation_sampler: Optional[InstanceSampler] = None,
+# ) -> Transformation:
+#     assert mode in ["train", "validation", "test"]
 
-    instance_sampler = {
-        "train": train_sampler
-        or ExpectedNumInstanceSampler(
-            num_instances=1.0,
-            min_past=0 if allow_padding else config.context_length,
-            min_future=config.prediction_length,
-        ),
-        "validation": validation_sampler
-        or ValidationSplitSampler(
-            min_past=0 if allow_padding else config.context_length,
-            min_future=config.prediction_length
-        ),
-        "test": TestSplitSampler(),
-    }[mode]
+#     instance_sampler = {
+#         "train": train_sampler
+#         or ExpectedNumInstanceSampler(
+#             num_instances=1.0,
+#             min_past=0 if allow_padding else config.context_length,
+#             min_future=config.prediction_length,
+#         ),
+#         "validation": validation_sampler
+#         or ValidationSplitSampler(
+#             min_past=0 if allow_padding else config.context_length,
+#             min_future=config.prediction_length
+#         ),
+#         "test": TestSplitSampler(),
+#     }[mode]
 
-    print(f"instance splitter created with context length {config.context_length}, lags {config.lags_sequence}")
+#     print(f"instance splitter created with context length {config.context_length}, lags {config.lags_sequence}")
 
-    return InstanceSplitter(
-        target_field="values",
-        is_pad_field=FieldName.IS_PAD,
-        start_field=FieldName.START,
-        forecast_start_field=FieldName.FORECAST_START,
-        instance_sampler=instance_sampler,
-        past_length=config.context_length + max(config.lags_sequence),
-        future_length=config.prediction_length,
-        time_series_fields=["time_features", "observed_mask"],
-    )
+#     return InstanceSplitter(
+#         target_field="values",
+#         is_pad_field=FieldName.IS_PAD,
+#         start_field=FieldName.START,
+#         forecast_start_field=FieldName.FORECAST_START,
+#         instance_sampler=instance_sampler,
+#         past_length=config.context_length + max(config.lags_sequence),
+#         future_length=config.prediction_length,
+#         time_series_fields=["time_features", "observed_mask"],
+#     )
 
 def create_train_dataloader_raw(
-    config: PretrainedConfig,
     dataset,
     batch_size: int,
     add_objid: Optional[bool] = False,
     seed: Optional[int] = 42,
+    has_labels = True,
+    masked_ft = False,
+    mask_probability = 0.6,
     **kwargs,
 ) -> Iterable:
 
     set_seed(seed)
 
-    PREDICTION_INPUT_NAMES = [
+    INPUT_NAMES = [
         "past_time_features",
         "past_values",
         "past_observed_mask",
-        "future_time_features",
     ]
-    if config.num_static_categorical_features > 0:
-        PREDICTION_INPUT_NAMES.append("static_categorical_features")
-
-    if config.num_static_real_features > 0:
-        PREDICTION_INPUT_NAMES.append("static_real_features")
-        if "redshift" in dataset.column_names:
-            dataset = dataset.rename_column("redshift", "static_real_features")
 
     if add_objid:
-        PREDICTION_INPUT_NAMES.append("objid")
+        INPUT_NAMES.append("objid")
 
-    TRAINING_INPUT_NAMES = PREDICTION_INPUT_NAMES + [
-        "future_values",
-        "future_observed_mask",
-    ]
-
-    if config.has_labels:
-        TRAINING_INPUT_NAMES.append("labels")
+    if has_labels:
+        INPUT_NAMES.append("labels")
         dataset = dataset.rename_column("label", "labels")
-    elif config.mask:
-        TRAINING_INPUT_NAMES.append("mask_label")
+    else:
+        INPUT_NAMES.append("mask_label")
 
-    transformed_data = transform_raw_data(dataset, config)
+    transformed_data = transform_raw_data(dataset)
     transformed_data = transformed_data.shuffle(seed=seed).flatten_indices()
-    mask_probability = 0. if config.has_labels else config.mask_probability # don't mask for fine-tuning
+    mask_probability = 0. if has_labels and not masked_ft else mask_probability # don't mask for fine-tuning
 
     return DataLoader(
         transformed_data,
         batch_size=batch_size,
         num_workers=1,
-        collate_fn=partial(masked_data_collator, mask_probability, TRAINING_INPUT_NAMES),
+        collate_fn=partial(masked_data_collator, mask_probability, INPUT_NAMES),
     )
 
 def create_test_dataloader_raw(
-    config: PretrainedConfig,
     dataset,
     batch_size: int,
     seed: Optional[int] = 42,
-    allow_padding: Optional[bool] = True,
     add_objid: Optional[bool] = False,
     compute_loss: Optional[bool] = False,
-    shuffle_buffer_length: Optional[int] = None,
+    has_labels: Optional[bool] = False,
+    mask_probability: Optional[float] = 0.6,
     **kwargs,
 ):
     set_seed(seed)
 
-    PREDICTION_INPUT_NAMES = [
+    INPUT_NAMES = [
         "past_time_features",
         "past_values",
         "past_observed_mask",
-        "future_time_features",
     ]
-    if config.num_static_categorical_features > 0:
-        PREDICTION_INPUT_NAMES.append("static_categorical_features")
 
-    if config.num_static_real_features > 0:
-        PREDICTION_INPUT_NAMES.append("static_real_features")
-        if "redshift" in dataset.column_names:
-            dataset = dataset.rename_column("redshift", "static_real_features")
-
-    if config.has_labels:
-        PREDICTION_INPUT_NAMES.append("labels")
+    if has_labels:
+        INPUT_NAMES.append("labels")
         dataset = dataset.rename_column("label", "labels")
 
     if add_objid:
-        PREDICTION_INPUT_NAMES.append("objid")
+        INPUT_NAMES.append("objid")
 
-    if compute_loss:
-        PREDICTION_INPUT_NAMES += [
-            "future_values",
-            "future_observed_mask",
-        ]
-
-    transformed_data = transform_raw_data(dataset, config)
-    if config.mask:
-        transformed_data = transformed_data.shuffle(seed=seed).flatten_indices()  # TODO add seed to args
-        mask_probability = 0. if config.has_labels else config.mask_probability# don't mask for fine-tuning
-        return DataLoader(
-            transformed_data,
-            batch_size=batch_size,
-            # sampler=sampler,
-            num_workers=0,
-            collate_fn=partial(masked_data_collator, mask_probability, PREDICTION_INPUT_NAMES)
-        )
-    # still passing in 'train' because otherwise it will take the last data point (no room for future values)
-    instance_sampler = create_instance_splitter(config, "train", allow_padding) + SelectFields(
-        PREDICTION_INPUT_NAMES
+    transformed_data = transform_raw_data(dataset)
+    transformed_data = transformed_data.shuffle(seed=seed).flatten_indices()
+    mask_probability = 0. if has_labels else mask_probability# don't mask for fine-tuning
+    return DataLoader(
+        transformed_data,
+        batch_size=batch_size,
+        # sampler=sampler,
+        num_workers=0,
+        collate_fn=partial(masked_data_collator, mask_probability, INPUT_NAMES)
     )
+    # still passing in 'train' because otherwise it will take the last data point (no room for future values)
+    # instance_sampler = create_instance_splitter(config, "train", allow_padding) + SelectFields(
+    #     PREDICTION_INPUT_NAMES
+    # )
 
     # we apply the transformations in test mode
     # testing_instances = instance_sampler.apply(
@@ -320,20 +290,20 @@ def create_test_dataloader_raw(
     #     # ),
     #     is_train=False
     # )
-    testing_instances = instance_sampler.apply(
-        transformed_data
-        if shuffle_buffer_length is None
-        else PseudoShuffled(
-            transformed_data,
-            shuffle_buffer_length=shuffle_buffer_length,
-        ),
-        is_train=False
-    )
+    # testing_instances = instance_sampler.apply(
+    #     transformed_data
+    #     if shuffle_buffer_length is None
+    #     else PseudoShuffled(
+    #         transformed_data,
+    #         shuffle_buffer_length=shuffle_buffer_length,
+    #     ),
+    #     is_train=False
+    # )
 
     # This returns a Dataloader which will go over the dataset once.
-    return DataLoader(
-        IterableDataset(testing_instances), batch_size=batch_size, **kwargs
-    )
+    # return DataLoader(
+    #     IterableDataset(testing_instances), batch_size=batch_size, **kwargs
+    # )
 
 def create_network_inputs(
     config: PretrainedConfig,

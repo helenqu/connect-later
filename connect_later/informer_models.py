@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Union
 
 from transformers import InformerPreTrainedModel, InformerModel, InformerForPrediction, InformerConfig
-from transformers.models.informer.modeling_informer import InformerConvLayer, InformerEncoder, InformerEncoderLayer, InformerDecoder, _expand_mask, weighted_average, nll
+from transformers.models.informer.modeling_informer import InformerConvLayer, InformerEncoder, InformerEncoderLayer, InformerDecoder, _prepare_4d_attention_mask, weighted_average, nll
 from transformers.modeling_outputs import SequenceClassifierOutput, Seq2SeqTSModelOutput, BaseModelOutput, Seq2SeqTSPredictionOutput, BaseModelOutputWithPastAndCrossAttentions, MaskedLMOutput
 from transformers.time_series_utils import StudentTOutput, NormalOutput, NegativeBinomialOutput
 
@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, functional as F
 
-from transformer_uda.dataset_preprocess_raw import create_network_inputs
+from connect_later.dataset_preprocess_raw import create_network_inputs
 
 import pdb
 import numpy as np
@@ -136,7 +136,7 @@ class InformerEncoderFourierPE(InformerEncoder):
         # expand attention_mask
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            attention_mask = _expand_mask(attention_mask, inputs_embeds.dtype)
+            attention_mask = _prepare_4d_attention_mask(attention_mask, inputs_embeds.dtype)
 
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -308,7 +308,7 @@ class InformerDecoderFourierPE(InformerDecoder):
         # expand encoder attention mask
         if encoder_hidden_states is not None and encoder_attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            encoder_attention_mask = _expand_mask(encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
+            encoder_attention_mask = _prepare_4d_attention_mask(encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
 
         hidden_states = self.value_embedding(inputs_embeds)
         embed_pos = self.embed_positions(inputs_embeds[:,:,-2:]) # last two rows of features dimension are time and central wavelength
@@ -561,6 +561,15 @@ class MaskedInformerFourierPE(InformerModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def uniformity_loss(self, batch):
+        batch_vectors = torch.mean(batch, dim=1) # (batch_size, d_model)
+        # other_inputs = torch.roll(batch_vectors, 1, 0) # shift by 1 in batch dimension
+        batch_vectors = F.normalize(batch_vectors)
+        # sims = F.cosine_similarity(batch_vectors, other_inputs, dim=1)
+        sims = batch_vectors @ batch_vectors.T
+        return sims.pow(2).mean()
+        # return torch.tensordot(batch_vectors, other_inputs)**2
+
     #TODO: write forward(), add MaskedInformerDecoder class
     def forward(
         self,
@@ -610,6 +619,7 @@ class MaskedInformerFourierPE(InformerModel):
             masked_predictions = prediction_scores.view(-1) * mask # multiply by 0 where mask array is 0, 1 where mask array is nonzero
             masked_lm_loss = loss_fct(masked_predictions, labels.view(-1)) # MSE(0,0) = 0 for masked predictions
             masked_lm_loss = masked_lm_loss / mask.sum()
+            masked_lm_loss += self.config.uniformity_loss_weight * self.uniformity_loss(outputs[0])
 
         if not return_dict:
             output = (prediction_scores,) + outputs[2:]
@@ -648,24 +658,23 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
         print(f"num labels: {self.num_labels}")
         self.config = config
 
-        if config.fourier_pe and config.mask:
-            config.distil = False
-            self.encoder = InformerEncoderFourierPE(config)
+        # if config.fourier_pe and config.mask:
+        config.distil = False
+        self.encoder = InformerEncoderFourierPE(config)
             # self.informer = MaskedInformerFourierPE(config)
-        elif config.fourier_pe:
-            self.model = InformerFourierPEModel(config)
-        else:
-            self.model = InformerModel(config)
+        # elif config.fourier_pe:
+        #     self.model = InformerFourierPEModel(config)
+        # else:
+        #     self.model = InformerModel(config)
 
-        classifier_dropout = (
-            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
-        )
-        print(f"classifier dropout: {classifier_dropout}")
+        # classifier_dropout = (
+        #     config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        # )
         # self.conv_layer = InformerConvLayer(config.hidden_size)
         # self.num_conv_layers = 7
         # self.pooler = nn.Linear(config.hidden_size, config.hidden_size)
         # self.pooler_activation = nn.Tanh()
-        self.dropout = nn.Dropout(classifier_dropout)
+        self.dropout = nn.Dropout(0.3)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
         # Initialize weights and apply final processing
@@ -759,7 +768,7 @@ class InformerForSequenceClassification(InformerPreTrainedModel):
                 loss_fn = BCEWithLogitsLoss()
             else:
                 loss_fn = CrossEntropyLoss(weight=weights) if weights is not None else CrossEntropyLoss()
-            loss = loss_fn(logits.squeeze(), labels)
+            loss = loss_fn(torch.squeeze(logits, 1), labels) # avoid squeezing batch dimension if batch has 1 object
 
         if not return_dict:
             output = (logits,) + outputs[2:]

@@ -5,12 +5,8 @@ from transformers import InformerConfig, InformerForPrediction, PretrainedConfig
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from torch.cuda.amp import autocast
 
-
 import torch
 from torch.optim import AdamW
-from torchinfo import summary
-
-from gluonts.time_feature import month_of_year
 
 import pandas as pd
 import numpy as np
@@ -24,10 +20,9 @@ import shutil
 from datetime import datetime
 from functools import partial
 
-from transformer_uda.informer_models import InformerFourierPEForPrediction, MaskedInformerFourierPE
-from transformer_uda.dataset_preprocess import create_train_dataloader
-from transformer_uda.dataset_preprocess_raw import create_train_dataloader_raw
-from transformer_uda.plotting_utils import plot_batch_examples
+from connect_later.informer_models import InformerFourierPEForPrediction, MaskedInformerFourierPE
+from connect_later.dataset_preprocess_raw import create_train_dataloader_raw
+from connect_later.plotting_utils import plot_batch_examples
 
 WANDB_DIR = "/pscratch/sd/h/helenqu/sn_transformer/wandb"
 CACHE_DIR = "/pscratch/sd/h/helenqu/huggingface_datasets_cache"
@@ -161,11 +156,11 @@ def train(args, base_config, add_config=None):
     print(config)
 
     dataset = get_dataset(args.data_dir)
-    sdss_dataset = get_dataset("/pscratch/sd/h/helenqu/sdss/dataset")
-    full_sdss_dataset = concatenate_datasets([sdss_dataset['train'], sdss_dataset['validation'], sdss_dataset['test']])
-    full_sdss_dataset = full_sdss_dataset.remove_columns(['label', 'redshift'])
-    dataset['train'] = concatenate_datasets([dataset['train'], full_sdss_dataset])
-    print(f"added SDSS data, dataset size: {len(dataset)}")
+    # sdss_dataset = get_dataset("/pscratch/sd/h/helenqu/sdss/dataset")
+    # full_sdss_dataset = concatenate_datasets([sdss_dataset['train'], sdss_dataset['validation'], sdss_dataset['test']])
+    # full_sdss_dataset = full_sdss_dataset.remove_columns(['label', 'redshift'])
+    # dataset['train'] = concatenate_datasets([dataset['train'], full_sdss_dataset])
+    # print(f"added SDSS data, dataset size: {len(dataset)}")
 
     model_config = setup_model_config(args, config)
 
@@ -178,9 +173,12 @@ def train(args, base_config, add_config=None):
         model = InformerFourierPEForPrediction(model_config)
         dataloader_fn = create_train_dataloader_raw
     else:
-        print("instantiating model with GP-interpolated inputs")
-        model = InformerForPrediction(model_config)
-        dataloader_fn = create_train_dataloader
+        print("no fourier PE and no mask?")
+        return
+    # else:
+    #     print("instantiating model with GP-interpolated inputs")
+    #     model = InformerForPrediction(model_config)
+    #     dataloader_fn = create_train_dataloader
     print(model)
     print(f"num total parameters: {sum(p.numel() for p in model.parameters())}")
     print(f"num trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
@@ -199,9 +197,10 @@ def train(args, base_config, add_config=None):
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
     train_dataloader = dataloader_fn(
-        config=model_config,
         dataset=dataset['train'],
         batch_size=config['batch_size'],
+        has_labels=model_config.has_labels,
+        mask_probability=model_config.mask_probability
     )
 
     model, optimizer, train_dataloader = accelerator.prepare(
@@ -265,20 +264,20 @@ if __name__ == "__main__":
     parser.add_argument("--log_level", type=str)
     parser.add_argument("--lr", type=float)
     parser.add_argument("--mask_probability", default=0.6, type=float)
+    parser.add_argument("--uniformity_loss_weight", default=0., type=float)
 
     args = parser.parse_args()
 
-    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/bigger_model_hyperparameters.yml") as f:
+    with open("/global/homes/h/helenqu/time_series_transformer/configs/bigger_model_hyperparameters.yml") as f:
     # with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/configs/75M_masked_hyperparameters.yml") as f:
         config = yaml.safe_load(f)
-    with open("/global/homes/h/helenqu/time_series_transformer/transformer_uda/hyperparameters.yml") as f:
-        sweep_config = yaml.safe_load(f)
 
+    config['uniformity_loss_weight'] = args.uniformity_loss_weight
     config['num_steps'] = args.num_steps
     config['weight_decay'] = 0.01
     config['dropout_rate'] = 0.2
     config['lr'] = 0.0001 # was 0.0001 with batch size 1024
-    config['batch_size'] = 256
+    config['batch_size'] = 32
     # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/raw/plasticc_raw_examples/just_train_set.txt"
     # config["data_subset_file"] = "/pscratch/sd/h/helenqu/plasticc/plasticc_all_gp_interp/examples/15_percent_filepaths.txt"
     config['scaling'] = None
